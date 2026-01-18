@@ -1,0 +1,39 @@
+# Stock Screening Strategy Parameters
+
+# Valuation Filters (Value)
+pe_ttm_max: 30  # Maximum PE_TTM ratio
+pb_max: 5       # Maximum PB ratio
+
+# Quality Filters
+roe_min: 8      # Minimum ROE (percentage)
+
+# Yield Filters
+dividend_yield_min: 1.5  # Minimum dividend yield (percentage)
+
+# Exclusion Rules
+listing_days_min: 365  # Minimum days since listing (exclude new stocks)
+
+# API Configuration
+api:
+  provider: eastmoney  # API 提供商: eastmoney (免费), tushare (付费)
+  use_free_api: true  # 是否使用免费 API
+  request_timeout: 10  # API 请求超时时间（秒）
+  max_retries: 3  # 最大重试次数
+  
+# Logging Configuration
+logging:
+  level: INFO  # 日志级别: DEBUG, INFO, WARNING, ERROR
+  file: logs/app.log  # 日志文件路径
+  console: true  # 是否输出到控制台
+  
+# Performance Configuration
+performance:
+  batch_size: 50  # API 批量处理大小
+  request_delay: 0.2  # API 请求延迟（秒）
+  cache_enabled: false  # 是否启用缓存
+
+# Output Configuration
+output:
+  directory: data/output  # 输出目录
+  report_format: markdown  # 报告格式
+  csv_encoding: utf-8-sig  # CSV 文件编码

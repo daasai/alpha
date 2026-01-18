@@ -1,0 +1,19 @@
+# Announcement Monitoring Keywords
+
+# Positive keywords (利好)
+positive:
+  - "增持"
+  - "回购"
+  - "预增"
+  - "中标"
+  - "分红"
+  - "股权激励"
+
+# Negative keywords (利空/警示)
+negative:
+  - "减持"
+  - "立案"
+  - "调查"
+  - "亏损"
+  - "违规"
+  - "警示函"
