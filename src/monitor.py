@@ -1,8 +1,14 @@
 """
 Monitor Module - "事件狙击手" (The Shield)
 公告异动监控：针对白名单股票进行公告关键词匹配
+
+analyze_sentiment：从 get_notices 取得 title、title_ch、column_names，
+prompt 使用「公告类型：{column_names}；标题：{title or title_ch}」。不包含 content；正文须经 art_code 详情页获取。
 """
 
+import json
+import os
+import re
 import pandas as pd
 import yaml
 from datetime import datetime, timedelta
@@ -11,6 +17,177 @@ from pathlib import Path
 from .logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def _load_ai_scoring_config(keywords_path='config/keywords.yaml'):
+    """
+    加载AI评分配置
+    
+    Args:
+        keywords_path: 配置文件路径
+        
+    Returns:
+        str: 系统提示词，如果配置不存在则返回默认值
+    """
+    default_prompt = 'Score the announcement impact on stock price from -10 to 10. Reply with only a JSON: {"score": int, "reason": "..."}.'
+    
+    try:
+        config_file = Path(keywords_path)
+        if not config_file.exists():
+            logger.warning(f"配置文件不存在: {keywords_path}，使用默认提示词")
+            return default_prompt
+        
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f) or {}
+        
+        ai_scoring = config.get('ai_scoring', {})
+        system_prompt = ai_scoring.get('system_prompt', '').strip()
+        
+        if system_prompt:
+            logger.debug("从配置文件加载AI评分系统提示词")
+            return system_prompt
+        else:
+            logger.warning("配置文件中未找到ai_scoring.system_prompt，使用默认提示词")
+            return default_prompt
+    except Exception as e:
+        logger.warning(f"加载AI评分配置失败: {e}，使用默认提示词")
+        return default_prompt
+
+
+def _parse_ai_response(text: str):
+    """
+    解析AI响应，支持新旧两种格式
+    
+    Args:
+        text: AI返回的JSON文本
+        
+    Returns:
+        tuple: (score: int, reason: str) 或 (None, None) 如果解析失败
+    """
+    try:
+        obj = json.loads(text)
+        
+        # 新格式：数组格式 [{"id": int, "score": int, "reason": "..."}]
+        if isinstance(obj, list):
+            if len(obj) == 0:
+                logger.warning("AI返回空数组")
+                return None, None
+            # 取第一个元素
+            item = obj[0]
+            if not isinstance(item, dict):
+                logger.warning(f"数组元素不是对象: {type(item)}")
+                return None, None
+            score = int(item.get("score", 0))
+            reason = str(item.get("reason", ""))[:500]
+            # id字段可以忽略，但可以用于验证
+            item_id = item.get("id", 0)
+            logger.debug(f"解析数组格式响应: id={item_id}, score={score}")
+            return score, reason
+        
+        # 旧格式：单个对象 {"score": int, "reason": "..."}
+        elif isinstance(obj, dict):
+            score = int(obj.get("score", 0))
+            reason = str(obj.get("reason", ""))[:500]
+            logger.debug(f"解析对象格式响应: score={score}")
+            return score, reason
+        
+        else:
+            logger.warning(f"未知的响应格式: {type(obj)}")
+            return None, None
+            
+    except json.JSONDecodeError as e:
+        logger.warning(f"JSON解析失败: {e}")
+        return None, None
+    except (ValueError, KeyError, TypeError) as e:
+        logger.warning(f"解析响应字段失败: {e}")
+        return None, None
+
+
+def analyze_sentiment(df: pd.DataFrame, data_provider=None) -> pd.DataFrame:
+    """
+    对 run_screening 的 df 逐行：取公告（get_notices），无则用「无最新公告」；
+    调用 LLM 打分 -10..10，仅返回 JSON {score, reason}；写回 ai_score, ai_reason。
+    prompt 使用「公告类型：{column_names}；标题：{title or title_ch}」。
+    """
+    if df.empty:
+        return df
+    if data_provider is None:
+        from .data_provider import DataProvider
+        data_provider = DataProvider()
+    if not os.getenv("OPENAI_API_KEY"):
+        raise ValueError("OPENAI_API_KEY 未设置，请在 .env 中配置")
+    from openai import OpenAI
+    client = OpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        base_url=os.getenv("OPENAI_API_BASE") or None,
+    )
+    # 支持通过环境变量配置模型名称，默认使用 gpt-3.5-turbo
+    model_name = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
+    logger.info(f"使用AI模型: {model_name}, API Base: {os.getenv('OPENAI_API_BASE', '默认(OpenAI官方)')}")
+    
+    # 从配置文件加载系统提示词
+    sys_prompt = _load_ai_scoring_config()
+    
+    end_date = datetime.now().strftime("%Y%m%d")
+    start_date = (datetime.now() - timedelta(days=3)).strftime("%Y%m%d")
+    scores, reasons = [], []
+    for idx, row in df.iterrows():
+        ts_code = row["ts_code"]
+        name = row.get("name", "")
+        title, column_names = "无最新公告", ""
+        try:
+            ndf = data_provider.get_notices([ts_code], start_date, end_date)
+            if not ndf.empty:
+                r = ndf.iloc[0]
+                title = str(r.get("title") or r.get("title_ch") or "无最新公告").strip() or "无最新公告"
+                column_names = str(r.get("column_names") or "").strip()
+        except Exception as e:
+            logger.debug(f"get_notices {ts_code} 失败: {e}")
+        user = f"Stock: {name}, ts_code: {ts_code}. 公告类型：{column_names}；标题：{title}."
+        text = None
+        try:
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}],
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```\s*$", "", text)
+            
+            # 使用新的解析函数，支持数组和对象两种格式
+            score, reason = _parse_ai_response(text)
+            
+            if score is not None and reason is not None:
+                scores.append(score)
+                reasons.append(reason)
+                logger.debug(f"AI评分成功 {ts_code}: score={score}")
+            else:
+                # 解析失败，使用默认值
+                logger.warning(f"AI响应解析失败 {ts_code}，使用默认值")
+                scores.append(0)
+                reasons.append("响应解析失败")
+                
+        except json.JSONDecodeError as e:
+            response_preview = text[:200] if text else "N/A"
+            logger.warning(f"LLM {ts_code} JSON解析失败: {e}, 响应内容: {response_preview}")
+            scores.append(0)
+            reasons.append("JSON解析错误")
+        except Exception as e:
+            error_msg = str(e)
+            # 提取更详细的错误信息
+            if hasattr(e, 'response') and hasattr(e.response, 'json'):
+                try:
+                    error_detail = e.response.json()
+                    error_msg = f"{error_msg} - {error_detail}"
+                except:
+                    pass
+            logger.error(f"LLM {ts_code} 调用失败: {error_msg}")
+            scores.append(0)
+            reasons.append(f"API错误: {error_msg[:100]}")
+    df = df.copy()
+    df["ai_score"] = scores
+    df["ai_reason"] = reasons
+    return df
 
 
 class AnnouncementMonitor:
@@ -44,7 +221,8 @@ class AnnouncementMonitor:
         分析公告，进行关键词匹配
         
         Args:
-            notices_df: 公告数据 DataFrame，包含 ts_code, ann_date, title
+            notices_df: 公告数据 DataFrame，需含 ts_code, ann_date, title；
+                若有 title_ch、column_names（东方财富扩展字段）也可传入，title 为空时以 title_ch 作标题
             lookback_days: 回溯天数（默认3天）
             
         Returns:
@@ -79,7 +257,10 @@ class AnnouncementMonitor:
         
         # 遍历每条公告进行关键词匹配
         for _, notice in recent_notices.iterrows():
-            title = str(notice['title']) if pd.notna(notice['title']) else ''
+            title = str(notice['title']) if pd.notna(notice.get('title')) else ''
+            if not title and 'title_ch' in notice.index:
+                t = notice.get('title_ch')
+                title = str(t) if pd.notna(t) else ''
             ts_code = notice['ts_code']
             notice_date = notice['ann_date']
             

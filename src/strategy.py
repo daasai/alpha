@@ -14,6 +14,141 @@ from .logging_config import get_logger
 logger = get_logger(__name__)
 
 
+def get_trade_date(dt=None):
+    """
+    获取交易日期。
+    若 dt 为 None 则用当前日期；若为周末则向前推到上一交易日。
+    若当前时间 < 17:00，则返回上一个交易日（Tushare 当日数据需在收盘后处理，17:00 完成更新）。
+    返回 %Y%m%d。
+    """
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    
+    if dt is None:
+        # 如果当前时间 < 17:00，使用上一个交易日
+        if now.hour < 17:
+            d = now - timedelta(days=1)
+        else:
+            d = now
+    else:
+        d = dt if isinstance(dt, datetime) else datetime.strptime(str(dt)[:10], "%Y-%m-%d")
+    
+    # 向前推到上一交易日（跳过周末）
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    
+    return d.strftime("%Y%m%d")
+
+
+def run_screening(trade_date=None, data_provider=None, risk_budget: float = 10000.0):
+    """
+    v1.1 筛选逻辑：
+    1. 硬过滤：移除ST/退市、亏损股(pe_ttm<0)、高PB股(pb>20)
+    2. 杠铃策略：添加strategy_tag（防守/进攻），过滤不匹配标签的股票
+    3. ATR仓位计算：计算suggested_shares
+    
+    返回 df 含 ts_code, name, pe_ttm, pb, roe, mv, dividend_yield, strategy_tag, suggested_shares, trade_date。
+    data_provider 需实现 get_daily_basic(trade_date), get_roe(trade_date, ts_codes), 
+    filter_new_stocks(df, trade_date), calculate_atr(ts_code, trade_date)。
+    """
+    if data_provider is None:
+        from .data_provider import DataProvider
+        data_provider = DataProvider()
+    trade_date = trade_date or get_trade_date()
+    
+    # 1. 获取基础数据
+    basic = data_provider.get_daily_basic(trade_date)
+    if basic.empty:
+        logger.warning("run_screening: get_daily_basic 返回空数据")
+        return pd.DataFrame()
+    
+    # 2. 过滤新股（上市不足6个月）
+    basic = data_provider.filter_new_stocks(basic, trade_date)
+    if basic.empty:
+        logger.warning("run_screening: 过滤新股后无数据")
+        return pd.DataFrame()
+    
+    # 3. 硬过滤规则
+    # 3.1 移除ST/退市股票（通过名称判断）
+    before_st = len(basic)
+    basic = basic[~basic["name"].str.contains("ST|\\*ST|退", regex=True, na=False)]
+    logger.debug(f"硬过滤-ST/退市: {before_st} -> {len(basic)}")
+    
+    # 3.2 移除亏损股 (pe_ttm < 0)
+    before_loss = len(basic)
+    basic = basic.dropna(subset=["pe_ttm"])
+    basic = basic[basic["pe_ttm"] > 0]
+    logger.debug(f"硬过滤-亏损股: {before_loss} -> {len(basic)}")
+    
+    # 3.3 移除高PB股 (pb > 20)
+    before_pb = len(basic)
+    basic = basic.dropna(subset=["pb"])
+    basic = basic[basic["pb"] <= 20]
+    logger.debug(f"硬过滤-高PB: {before_pb} -> {len(basic)}")
+    
+    if basic.empty:
+        logger.warning("run_screening: 硬过滤后无数据")
+        return pd.DataFrame()
+    
+    # 4. 获取ROE
+    roe_df = data_provider.get_roe(trade_date, basic["ts_code"].tolist())
+    if roe_df.empty:
+        logger.warning("run_screening: get_roe 返回空数据")
+        return pd.DataFrame()
+    
+    merged = basic.merge(roe_df, on="ts_code", how="inner")
+    merged = merged.dropna(subset=["roe"])
+    
+    # dividend_yield 已从 get_daily_basic 获取
+    if "dividend_yield" not in merged.columns:
+        merged["dividend_yield"] = 0.0
+    
+    if merged.empty:
+        logger.warning("run_screening: 合并ROE后无数据")
+        return pd.DataFrame()
+    
+    # 5. 杠铃策略标签
+    # 🛡️ 防守: dividend_yield > 3 AND pe_ttm < 15
+    # 🚀 进攻: roe > 12 AND mv < 50000000000 (50亿，单位：万元)
+    merged["strategy_tag"] = ""
+    defensive_mask = (merged["dividend_yield"] > 3) & (merged["pe_ttm"] < 15)
+    aggressive_mask = (merged["roe"] > 12) & (merged["mv"] < 50000000000)
+    
+    merged.loc[defensive_mask, "strategy_tag"] = "防守"
+    merged.loc[aggressive_mask, "strategy_tag"] = "进攻"
+    
+    # 过滤：只保留有标签的股票
+    before_barbell = len(merged)
+    merged = merged[merged["strategy_tag"] != ""]
+    logger.debug(f"杠铃策略过滤: {before_barbell} -> {len(merged)}")
+    
+    if merged.empty:
+        logger.warning("run_screening: 杠铃策略过滤后无数据")
+        return pd.DataFrame()
+    
+    # 6. ATR仓位计算
+    merged["suggested_shares"] = 0
+    for idx, row in merged.iterrows():
+        ts_code = row["ts_code"]
+        atr = data_provider.calculate_atr(ts_code, trade_date, period=20)
+        if atr > 0:
+            # suggested_shares = floor(risk_budget / ATR / 100) * 100
+            shares = (risk_budget / atr) // 100 * 100
+            merged.at[idx, "suggested_shares"] = int(max(0, shares))
+        else:
+            merged.at[idx, "suggested_shares"] = 0
+    
+    # 7. 选择输出列
+    out = merged[[
+        "ts_code", "name", "pe_ttm", "pb", "roe", "mv", 
+        "dividend_yield", "strategy_tag", "suggested_shares"
+    ]].copy()
+    out["trade_date"] = trade_date
+    
+    logger.info(f"run_screening 完成: {len(out)} 只股票")
+    return out.reset_index(drop=True)
+
+
 class StockStrategy:
     """股票筛选策略类"""
     

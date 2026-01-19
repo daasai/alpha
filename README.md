@@ -4,9 +4,16 @@
 
 ## 运行
 
+**Phase 1（批处理）**
 ```bash
 python3 main.py
 ```
+
+**Phase 2（DAAS Alpha Streamlit）**
+```bash
+streamlit run app.py
+```
+需在 `.env` 中配置：`TUSHARE_TOKEN`、`OPENAI_API_KEY`；可选 `OPENAI_API_BASE`（如 DeepSeek：`https://api.deepseek.com`）、`OPENAI_MODEL`（模型名称，默认：`gpt-3.5-turbo`）。数据库：`data/daas.db`。
 
 首次使用请先阅读 [docs/QUICK_START.md](docs/QUICK_START.md)（依赖安装、Python 版本、常见问题）。
 
@@ -16,6 +23,14 @@ python3 main.py
 
 ```bash
 python3 diagnose_notices.py
+```
+
+测试 AI 评分接口是否正常：
+
+```bash
+python3 tests/test_ai_scoring.py
+# 或
+python3 -m tests.test_ai_scoring
 ```
 
 ## 文档
@@ -39,10 +54,11 @@ python3 -m pytest tests/ -v
 
 ```
 config/       # 配置（settings.yaml, keywords.yaml）
-data/         # 数据目录（output, raw, cache）
+data/         # 数据目录（output, raw, daas.db）
 docs/         # 文档
-src/          # 源码（data_loader, strategy, monitor, reporter, api…）
+src/          # 源码（data_loader, strategy, monitor, reporter, database, data_provider, api…）
 tests/        # 测试
 main.py       # 入口
+app.py        # DAAS Alpha Streamlit 入口
 diagnose_notices.py  # 公告 API 诊断
 ```

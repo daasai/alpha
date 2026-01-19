@@ -41,7 +41,8 @@ class EastmoneyAPI:
             start_date: 开始日期，格式 'YYYYMMDD'（会自动转换为 'YYYY-MM-DD'）
         
         Returns:
-            pd.DataFrame: 包含 ts_code, ann_date, title, content 列
+            pd.DataFrame: 包含 ts_code, ann_date, title, title_ch, art_code, column_names 列
+            （不包含 content；正文须经 art_code 详情页二次获取，见 README）
         """
         logger.info(f"从东方财富获取 {len(stock_list)} 只股票的公告")
         
@@ -105,11 +106,19 @@ class EastmoneyAPI:
                                     
                                     # 过滤时间：只保留 start_date 之后的公告
                                     if notice_dt >= start_dt:
+                                        columns_arr = item.get('columns') or []
+                                        column_names = '|'.join(
+                                            str(c.get('column_name', '')).strip()
+                                            for c in columns_arr
+                                            if c and isinstance(c, dict)
+                                        )
                                         all_notices.append({
                                             'ts_code': stock_code,
                                             'ann_date': notice_date_str.replace('-', ''),  # 转换为 YYYYMMDD 格式
                                             'title': item.get('title', ''),
-                                            'content': item.get('title', '')  # 免费接口通常只能拿标题
+                                            'title_ch': item.get('title_ch', ''),
+                                            'art_code': item.get('art_code', ''),
+                                            'column_names': column_names,
                                         })
                                 except ValueError:
                                     # 日期格式解析失败，跳过这条
@@ -162,7 +171,7 @@ class EastmoneyAPI:
         
         if not all_notices:
             logger.info("未获取到任何公告")
-            return pd.DataFrame(columns=['ts_code', 'ann_date', 'title', 'content'])
+            return pd.DataFrame(columns=['ts_code', 'ann_date', 'title', 'title_ch', 'art_code', 'column_names'])
         
         result_df = pd.DataFrame(all_notices)
         logger.info(f"成功获取 {len(result_df)} 条公告")

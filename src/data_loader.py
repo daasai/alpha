@@ -380,9 +380,15 @@ class DataLoader:
             start_date: 开始日期，格式 'YYYYMMDD'（会自动转换为 'YYYY-MM-DD'）
             
         Returns:
-            pd.DataFrame: 包含 ts_code, ann_date, title, content 列
+            pd.DataFrame: 包含 ts_code, ann_date, title, title_ch, art_code, column_names 列
+            （不包含 content；正文须经 art_code 详情页二次获取，见 README）
         """
         try:
+            # 如果已经初始化了eastmoney_api，直接使用（返回 ts_code, ann_date, title, title_ch, art_code, column_names）
+            if hasattr(self, 'eastmoney_api'):
+                logger.info("使用已初始化的东方财富API")
+                return self.eastmoney_api.get_notices(stock_list, start_date)
+            
             all_notices = []
             total_stocks = len(stock_list)
             error_count = 0
@@ -393,14 +399,8 @@ class DataLoader:
                 start_dt = datetime.strptime(start_date, '%Y%m%d')
                 start_date_formatted = start_dt.strftime('%Y-%m-%d')
             except ValueError:
-                # 如果已经是 'YYYY-MM-DD' 格式，直接使用
                 start_date_formatted = start_date
                 start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-            
-            # 如果已经初始化了eastmoney_api，直接使用
-            if hasattr(self, 'eastmoney_api'):
-                logger.info("使用已初始化的东方财富API")
-                return self.eastmoney_api.get_notices(stock_list, start_date)
             
             # 使用 tqdm 显示进度
             logger.info(f"正在从东方财富获取公告信息，共 {total_stocks} 只股票...")
@@ -446,11 +446,19 @@ class DataLoader:
                                         
                                         # 过滤时间：只保留 start_date 之后的公告
                                         if notice_dt >= start_dt:
+                                            columns_arr = item.get('columns') or []
+                                            column_names = '|'.join(
+                                                str(c.get('column_name', '')).strip()
+                                                for c in columns_arr
+                                                if c and isinstance(c, dict)
+                                            )
                                             all_notices.append({
                                                 'ts_code': stock_code,
-                                                'ann_date': notice_date_str.replace('-', ''),  # 转换为 YYYYMMDD 格式以保持一致性
+                                                'ann_date': notice_date_str.replace('-', ''),
                                                 'title': item.get('title', ''),
-                                                'content': item.get('title', '')  # 免费接口通常只能拿标题
+                                                'title_ch': item.get('title_ch', ''),
+                                                'art_code': item.get('art_code', ''),
+                                                'column_names': column_names,
                                             })
                                     except ValueError:
                                         # 日期格式解析失败，跳过这条
@@ -500,7 +508,7 @@ class DataLoader:
             
             if not all_notices:
                 logger.info("未获取到任何公告")
-                return pd.DataFrame(columns=['ts_code', 'ann_date', 'title', 'content'])
+                return pd.DataFrame(columns=['ts_code', 'ann_date', 'title', 'title_ch', 'art_code', 'column_names'])
             
             result_df = pd.DataFrame(all_notices)
             logger.info(f"成功获取 {len(result_df)} 条公告")
@@ -508,5 +516,4 @@ class DataLoader:
             
         except Exception as e:
             logger.error(f"从东方财富获取公告失败: {e}")
-            # 返回空DataFrame而不是抛出异常，允许程序继续运行
-            return pd.DataFrame(columns=['ts_code', 'ann_date', 'title', 'content'])
+            return pd.DataFrame(columns=['ts_code', 'ann_date', 'title', 'title_ch', 'art_code', 'column_names'])

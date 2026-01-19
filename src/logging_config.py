@@ -43,7 +43,7 @@ def setup_logging(log_level='INFO', log_file=None):
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(log_level)  # 与控制台级别一致，不记录 DEBUG
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
     
