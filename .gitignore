@@ -30,7 +30,7 @@ wheels/
 # Testing & logs
 .coverage
 .pytest_cache/
-htmlcov/
+tests/htmlcov/
 .tox/
 .mypy_cache/
 .ruff_cache/
