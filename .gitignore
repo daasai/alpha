@@ -9,6 +9,7 @@ __pycache__/
 .Python
 env/
 venv/
+.venv/
 ENV/
 build/
 develop-eggs/
@@ -28,7 +29,13 @@ wheels/
 
 # Testing & logs
 .coverage
+.pytest_cache/
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
 logs/
+*.log
 
 # Data files
 docs/*
@@ -45,6 +52,8 @@ data/*.csv
 *.swp
 *.swo
 *~
+.ipynb_checkpoints/
+*.ipynb_checkpoints
 
 # OS
 .DS_Store
