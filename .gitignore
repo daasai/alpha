@@ -34,6 +34,8 @@ logs/
 docs/*
 data/raw/*
 data/output/*
+data/*.db
+data/*.csv
 !data/raw/.gitkeep
 !data/output/.gitkeep
 
