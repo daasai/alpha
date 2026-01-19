@@ -126,17 +126,53 @@ def run_screening(trade_date=None, data_provider=None, risk_budget: float = 1000
         logger.warning("run_screening: 杠铃策略过滤后无数据")
         return pd.DataFrame()
     
-    # 6. ATR仓位计算
+    # 6. ATR仓位计算（并发优化）
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from tqdm import tqdm
+    
     merged["suggested_shares"] = 0
-    for idx, row in merged.iterrows():
-        ts_code = row["ts_code"]
-        atr = data_provider.calculate_atr(ts_code, trade_date, period=20)
-        if atr > 0:
-            # suggested_shares = floor(risk_budget / ATR / 100) * 100
-            shares = (risk_budget / atr) // 100 * 100
-            merged.at[idx, "suggested_shares"] = int(max(0, shares))
-        else:
-            merged.at[idx, "suggested_shares"] = 0
+    
+    def calculate_atr_for_stock(args):
+        """计算单个股票的ATR和suggested_shares"""
+        idx, ts_code, trade_date, risk_budget, data_provider = args
+        try:
+            atr = data_provider.calculate_atr(ts_code, trade_date, period=20)
+            if atr > 0:
+                # suggested_shares = floor(risk_budget / ATR / 100) * 100
+                shares = (risk_budget / atr) // 100 * 100
+                return (idx, int(max(0, shares)))
+            else:
+                return (idx, 0)
+        except Exception as e:
+            logger.debug(f"calculate_atr {ts_code} 失败: {e}")
+            return (idx, 0)
+    
+    # 并发计算ATR（10个并发）
+    atr_args = [
+        (idx, row["ts_code"], trade_date, risk_budget, data_provider)
+        for idx, row in merged.iterrows()
+    ]
+    
+    max_workers = 10
+    logger.info(f"开始并发计算ATR，共 {len(atr_args)} 只股票，并发数: {max_workers}")
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {
+            executor.submit(calculate_atr_for_stock, args): args[0]
+            for args in atr_args
+        }
+        
+        with tqdm(total=len(atr_args), desc="ATR计算进度", unit="只", ncols=80) as pbar:
+            for future in as_completed(future_to_idx):
+                try:
+                    idx, shares = future.result()
+                    merged.at[idx, "suggested_shares"] = shares
+                except Exception as e:
+                    idx = future_to_idx[future]
+                    logger.debug(f"ATR计算任务异常 {merged.iloc[idx]['ts_code']}: {e}")
+                    merged.at[idx, "suggested_shares"] = 0
+                finally:
+                    pbar.update(1)
     
     # 7. 选择输出列
     out = merged[[
@@ -268,4 +304,102 @@ class StockStrategy:
         result = result.sort_values('roe', ascending=False).reset_index(drop=True)
         
         logger.info(f"筛选完成: 最终白名单 {len(result)} 只股票")
+        return result
+
+
+class AlphaStrategy:
+    """
+    Alpha Trident Strategy - "三叉戟"策略
+    基于动量、价值、流动性和趋势四个维度的多因子筛选
+    """
+    
+    def __init__(self, enriched_df: pd.DataFrame):
+        """
+        初始化Alpha策略
+        
+        Args:
+            enriched_df: 已包含因子列的DataFrame（通过FactorPipeline计算得到）
+        """
+        self.enriched_df = enriched_df.copy() if not enriched_df.empty else pd.DataFrame()
+        logger.debug(f"AlphaStrategy初始化: 输入数据 {len(self.enriched_df)} 行")
+    
+    def filter_alpha_trident(self) -> pd.DataFrame:
+        """
+        Alpha Trident筛选逻辑：
+        1. rps_60 > 85
+        2. is_undervalued == True
+        3. vol_ratio_5 > 1.5
+        4. above_ma_20 == True
+        
+        Returns:
+            DataFrame: 筛选后的股票，按rps_60降序排序
+            包含列: ts_code, name, close, pe_ttm, rps_60, vol_ratio_5
+        """
+        if self.enriched_df.empty:
+            logger.warning("filter_alpha_trident: enriched_df为空")
+            return pd.DataFrame()
+        
+        df = self.enriched_df.copy()
+        
+        # 检查必需的列
+        required_columns = ['rps_60', 'is_undervalued', 'vol_ratio_5', 'above_ma_20']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            logger.error(f"filter_alpha_trident: 缺少必需的列: {missing_columns}")
+            raise ValueError(f"缺少必需的因子列: {missing_columns}")
+        
+        initial_count = len(df)
+        logger.info(f"filter_alpha_trident: 开始筛选，初始股票数: {initial_count}")
+        
+        # 筛选条件1: rps_60 > 85
+        df = df[df['rps_60'].notna() & (df['rps_60'] > 85)]
+        logger.debug(f"动量筛选 (rps_60 > 85): {initial_count} -> {len(df)}")
+        
+        if df.empty:
+            logger.warning("filter_alpha_trident: 动量筛选后无数据")
+            return pd.DataFrame()
+        
+        # 筛选条件2: is_undervalued == True
+        before_value = len(df)
+        df = df[df['is_undervalued'] == True]
+        logger.debug(f"价值筛选 (is_undervalued == True): {before_value} -> {len(df)}")
+        
+        if df.empty:
+            logger.warning("filter_alpha_trident: 价值筛选后无数据")
+            return pd.DataFrame()
+        
+        # 筛选条件3: vol_ratio_5 > 1.5
+        before_liquidity = len(df)
+        df = df[df['vol_ratio_5'] > 1.5]
+        logger.debug(f"流动性筛选 (vol_ratio_5 > 1.5): {before_liquidity} -> {len(df)}")
+        
+        if df.empty:
+            logger.warning("filter_alpha_trident: 流动性筛选后无数据")
+            return pd.DataFrame()
+        
+        # 筛选条件4: above_ma_20 == True
+        before_trend = len(df)
+        df = df[df['above_ma_20'] == True]
+        logger.debug(f"趋势筛选 (above_ma_20 == True): {before_trend} -> {len(df)}")
+        
+        if df.empty:
+            logger.warning("filter_alpha_trident: 趋势筛选后无数据")
+            return pd.DataFrame()
+        
+        # 按rps_60降序排序
+        df = df.sort_values('rps_60', ascending=False).reset_index(drop=True)
+        
+        # 添加 strategy_tag 列（所有通过 Alpha Trident 筛选的股票都是强推荐）
+        df['strategy_tag'] = '🚀 强推荐'
+        
+        # 选择输出列
+        output_columns = ['ts_code', 'name', 'close', 'pe_ttm', 'rps_60', 'vol_ratio_5', 'strategy_tag']
+        missing_output_cols = [col for col in output_columns if col not in df.columns]
+        if missing_output_cols:
+            logger.error(f"filter_alpha_trident: 输出列缺失: {missing_output_cols}")
+            raise ValueError(f"缺少必需的输出列: {missing_output_cols}")
+        
+        result = df[output_columns].copy()
+        
+        logger.info(f"filter_alpha_trident: 筛选完成，最终股票数: {len(result)} (从 {initial_count} 只股票中筛选)")
         return result

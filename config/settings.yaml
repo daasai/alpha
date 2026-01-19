@@ -37,3 +37,9 @@ output:
   directory: data/output  # 输出目录
   report_format: markdown  # 报告格式
   csv_encoding: utf-8-sig  # CSV 文件编码
+
+# Index Filter Configuration
+index_filter:
+  enabled: true  # 是否启用指数过滤
+  index_code: "000852.SH"  # 指数代码（中证1000）
+  fallback_to_all: false  # 获取失败时是否降级到全市场（false=返回空数据）

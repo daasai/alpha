@@ -108,6 +108,8 @@ def analyze_sentiment(df: pd.DataFrame, data_provider=None) -> pd.DataFrame:
     对 run_screening 的 df 逐行：取公告（get_notices），无则用「无最新公告」；
     调用 LLM 打分 -10..10，仅返回 JSON {score, reason}；写回 ai_score, ai_reason。
     prompt 使用「公告类型：{column_names}；标题：{title or title_ch}」。
+    
+    性能优化：批量获取公告 + 并发AI评分
     """
     if df.empty:
         return df
@@ -117,6 +119,9 @@ def analyze_sentiment(df: pd.DataFrame, data_provider=None) -> pd.DataFrame:
     if not os.getenv("OPENAI_API_KEY"):
         raise ValueError("OPENAI_API_KEY 未设置，请在 .env 中配置")
     from openai import OpenAI
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from tqdm import tqdm
+    
     client = OpenAI(
         api_key=os.getenv("OPENAI_API_KEY"),
         base_url=os.getenv("OPENAI_API_BASE") or None,
@@ -130,19 +135,39 @@ def analyze_sentiment(df: pd.DataFrame, data_provider=None) -> pd.DataFrame:
     
     end_date = datetime.now().strftime("%Y%m%d")
     start_date = (datetime.now() - timedelta(days=3)).strftime("%Y%m%d")
-    scores, reasons = [], []
-    for idx, row in df.iterrows():
+    
+    # 优化1：批量获取所有股票的公告
+    logger.info(f"批量获取 {len(df)} 只股票的公告...")
+    try:
+        all_notices = data_provider.get_notices(df["ts_code"].tolist(), start_date, end_date)
+        # 构建公告查找字典：{ts_code: {title, column_names}}
+        notices_dict = {}
+        if not all_notices.empty:
+            for _, notice_row in all_notices.iterrows():
+                ts_code = notice_row.get("ts_code")
+                if ts_code:
+                    title = str(notice_row.get("title") or notice_row.get("title_ch") or "无最新公告").strip() or "无最新公告"
+                    column_names = str(notice_row.get("column_names") or "").strip()
+                    notices_dict[ts_code] = {"title": title, "column_names": column_names}
+        logger.info(f"成功获取 {len(notices_dict)} 只股票的公告")
+    except Exception as e:
+        logger.warning(f"批量获取公告失败: {e}，将使用逐个获取方式")
+        notices_dict = {}
+    
+    # 优化2：并发AI评分
+    def score_single_stock(args):
+        """单个股票的AI评分函数"""
+        idx, row, notices_dict, client, model_name, sys_prompt = args
         ts_code = row["ts_code"]
         name = row.get("name", "")
+        
+        # 从公告字典中获取公告信息
         title, column_names = "无最新公告", ""
-        try:
-            ndf = data_provider.get_notices([ts_code], start_date, end_date)
-            if not ndf.empty:
-                r = ndf.iloc[0]
-                title = str(r.get("title") or r.get("title_ch") or "无最新公告").strip() or "无最新公告"
-                column_names = str(r.get("column_names") or "").strip()
-        except Exception as e:
-            logger.debug(f"get_notices {ts_code} 失败: {e}")
+        if ts_code in notices_dict:
+            notice_info = notices_dict[ts_code]
+            title = notice_info.get("title", "无最新公告")
+            column_names = notice_info.get("column_names", "")
+        
         user = f"Stock: {name}, ts_code: {ts_code}. 公告类型：{column_names}；标题：{title}."
         text = None
         try:
@@ -158,20 +183,15 @@ def analyze_sentiment(df: pd.DataFrame, data_provider=None) -> pd.DataFrame:
             score, reason = _parse_ai_response(text)
             
             if score is not None and reason is not None:
-                scores.append(score)
-                reasons.append(reason)
-                logger.debug(f"AI评分成功 {ts_code}: score={score}")
+                return (idx, score, reason, None)
             else:
-                # 解析失败，使用默认值
                 logger.warning(f"AI响应解析失败 {ts_code}，使用默认值")
-                scores.append(0)
-                reasons.append("响应解析失败")
+                return (idx, 0, "响应解析失败", None)
                 
         except json.JSONDecodeError as e:
             response_preview = text[:200] if text else "N/A"
             logger.warning(f"LLM {ts_code} JSON解析失败: {e}, 响应内容: {response_preview}")
-            scores.append(0)
-            reasons.append("JSON解析错误")
+            return (idx, 0, "JSON解析错误", None)
         except Exception as e:
             error_msg = str(e)
             # 提取更详细的错误信息
@@ -182,11 +202,54 @@ def analyze_sentiment(df: pd.DataFrame, data_provider=None) -> pd.DataFrame:
                 except:
                     pass
             logger.error(f"LLM {ts_code} 调用失败: {error_msg}")
-            scores.append(0)
-            reasons.append(f"API错误: {error_msg[:100]}")
+            return (idx, 0, f"API错误: {error_msg[:100]}", str(e))
+    
+    # 准备参数列表
+    score_args = [
+        (idx, row, notices_dict, client, model_name, sys_prompt)
+        for idx, row in df.iterrows()
+    ]
+    
+    # 使用线程池并发执行（5个并发，考虑API限流）
+    scores_dict = {}
+    reasons_dict = {}
+    max_workers = 5
+    
+    logger.info(f"开始并发AI评分，共 {len(score_args)} 只股票，并发数: {max_workers}")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有任务
+        future_to_idx = {
+            executor.submit(score_single_stock, args): args[0]
+            for args in score_args
+        }
+        
+        # 使用tqdm显示进度
+        with tqdm(total=len(score_args), desc="AI评分进度", unit="只", ncols=80) as pbar:
+            for future in as_completed(future_to_idx):
+                try:
+                    idx, score, reason, error = future.result()
+                    scores_dict[idx] = score
+                    reasons_dict[idx] = reason
+                    if error:
+                        logger.debug(f"股票 {df.iloc[idx]['ts_code']} 评分完成（有错误）")
+                    else:
+                        logger.debug(f"AI评分成功 {df.iloc[idx]['ts_code']}: score={score}")
+                except Exception as e:
+                    idx = future_to_idx[future]
+                    logger.error(f"AI评分任务异常 {df.iloc[idx]['ts_code']}: {e}")
+                    scores_dict[idx] = 0
+                    reasons_dict[idx] = f"任务异常: {str(e)[:100]}"
+                finally:
+                    pbar.update(1)
+    
+    # 按原始索引顺序构建结果
+    scores = [scores_dict.get(idx, 0) for idx in range(len(df))]
+    reasons = [reasons_dict.get(idx, "评分失败") for idx in range(len(df))]
+    
     df = df.copy()
     df["ai_score"] = scores
     df["ai_reason"] = reasons
+    logger.info(f"AI评分完成，共 {len(df)} 只股票")
     return df
 
 
