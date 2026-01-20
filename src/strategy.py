@@ -147,13 +147,18 @@ def run_screening(trade_date=None, data_provider=None, risk_budget: float = 1000
             logger.debug(f"calculate_atr {ts_code} 失败: {e}")
             return (idx, 0)
     
-    # 并发计算ATR（10个并发）
+    # 并发计算ATR（从配置读取并发数）
     atr_args = [
         (idx, row["ts_code"], trade_date, risk_budget, data_provider)
         for idx, row in merged.iterrows()
     ]
     
-    max_workers = 10
+    try:
+        from .config_manager import ConfigManager
+        config = ConfigManager()
+        max_workers = config.get('concurrency.atr_workers', 10)
+    except Exception:
+        max_workers = 10
     logger.info(f"开始并发计算ATR，共 {len(atr_args)} 只股票，并发数: {max_workers}")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -313,22 +318,36 @@ class AlphaStrategy:
     基于动量、价值、流动性和趋势四个维度的多因子筛选
     """
     
-    def __init__(self, enriched_df: pd.DataFrame):
+    def __init__(self, enriched_df: pd.DataFrame, config=None):
         """
         初始化Alpha策略
         
         Args:
             enriched_df: 已包含因子列的DataFrame（通过FactorPipeline计算得到）
+            config: 配置管理器，如果为None则创建新实例
         """
         self.enriched_df = enriched_df.copy() if not enriched_df.empty else pd.DataFrame()
-        logger.debug(f"AlphaStrategy初始化: 输入数据 {len(self.enriched_df)} 行")
+        
+        # 加载配置
+        if config is None:
+            from .config_manager import ConfigManager
+            self.config = ConfigManager()
+        else:
+            self.config = config
+        
+        # 从配置读取阈值
+        self.rps_threshold = self.config.get('strategy.alpha_trident.rps_threshold', 85)
+        self.vol_ratio_threshold = self.config.get('strategy.alpha_trident.vol_ratio_threshold', 1.5)
+        
+        logger.debug(f"AlphaStrategy初始化: 输入数据 {len(self.enriched_df)} 行, "
+                    f"RPS阈值={self.rps_threshold}, 量比阈值={self.vol_ratio_threshold}")
     
     def filter_alpha_trident(self) -> pd.DataFrame:
         """
         Alpha Trident筛选逻辑：
-        1. rps_60 > 85
+        1. rps_60 > threshold (从配置读取，默认85)
         2. is_undervalued == True
-        3. vol_ratio_5 > 1.5
+        3. vol_ratio_5 > threshold (从配置读取，默认1.5)
         4. above_ma_20 == True
         
         Returns:
@@ -351,9 +370,9 @@ class AlphaStrategy:
         initial_count = len(df)
         logger.info(f"filter_alpha_trident: 开始筛选，初始股票数: {initial_count}")
         
-        # 筛选条件1: rps_60 > 85
-        df = df[df['rps_60'].notna() & (df['rps_60'] > 85)]
-        logger.debug(f"动量筛选 (rps_60 > 85): {initial_count} -> {len(df)}")
+        # 筛选条件1: rps_60 > threshold
+        df = df[df['rps_60'].notna() & (df['rps_60'] > self.rps_threshold)]
+        logger.debug(f"动量筛选 (rps_60 > {self.rps_threshold}): {initial_count} -> {len(df)}")
         
         if df.empty:
             logger.warning("filter_alpha_trident: 动量筛选后无数据")
@@ -368,10 +387,10 @@ class AlphaStrategy:
             logger.warning("filter_alpha_trident: 价值筛选后无数据")
             return pd.DataFrame()
         
-        # 筛选条件3: vol_ratio_5 > 1.5
+        # 筛选条件3: vol_ratio_5 > threshold
         before_liquidity = len(df)
-        df = df[df['vol_ratio_5'] > 1.5]
-        logger.debug(f"流动性筛选 (vol_ratio_5 > 1.5): {before_liquidity} -> {len(df)}")
+        df = df[df['vol_ratio_5'] > self.vol_ratio_threshold]
+        logger.debug(f"流动性筛选 (vol_ratio_5 > {self.vol_ratio_threshold}): {before_liquidity} -> {len(df)}")
         
         if df.empty:
             logger.warning("filter_alpha_trident: 流动性筛选后无数据")

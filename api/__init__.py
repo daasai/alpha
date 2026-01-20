@@ -1,0 +1,3 @@
+"""
+DAAS Alpha FastAPI Application
+"""

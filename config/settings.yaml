@@ -43,3 +43,48 @@ index_filter:
   enabled: true  # 是否启用指数过滤
   index_code: "000852.SH"  # 指数代码（中证1000）
   fallback_to_all: false  # 获取失败时是否降级到全市场（false=返回空数据）
+
+# Concurrency Configuration
+concurrency:
+  roe_workers: 10  # ROE获取并发数
+  ai_workers: 5    # AI评分并发数
+  atr_workers: 10  # ATR计算并发数
+
+# API Rate Limit Configuration
+api_rate_limit:
+  tushare_delay: 0.1      # Tushare API延迟（秒）
+  eastmoney_delay: 0.2   # 东方财富API延迟（秒）
+  retry_delay: 0.5       # 重试延迟（秒）
+  task_delay: 0.02       # 任务完成后延迟（秒）
+  max_retries: 3         # 最大重试次数
+
+# Strategy Parameters
+strategy:
+  alpha_trident:
+    rps_threshold: 85        # RPS阈值
+    vol_ratio_threshold: 1.5 # 量比阈值
+    pe_max: 30               # 最大PE
+  backtest:
+    index_code: "000300.SH"  # 回测股票池指数（沪深300）
+    initial_capital: 1000000.0  # 初始资金
+    max_positions: 4         # 最大持仓数
+
+# Factor Parameters
+factors:
+  rps:
+    window: 60  # RPS计算窗口（天）
+  ma:
+    window: 20  # MA计算窗口（天）
+  volume_ratio:
+    window: 5   # 量比计算窗口（天）
+  pe:
+    max: 30     # 最大PE
+
+# Hunter Configuration
+hunter:
+  history_days: 120  # 历史数据获取天数（确保有足够交易日）
+
+# Portfolio Configuration
+portfolio:
+  default_shares: 100  # 默认持仓数量（股）
+  default_stop_loss_ratio: 0.9  # 默认止损比例（当前价格的90%）
