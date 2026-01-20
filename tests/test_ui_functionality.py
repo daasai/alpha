@@ -99,11 +99,11 @@ class TestUIFunctionalityBasic:
         with open("app.py", "r", encoding="utf-8") as f:
             content = f.read()
         
-        # Check for key imports
+        # Check for key imports (重构后应该从pages导入)
         assert "import streamlit" in content
-        assert "from src.factors" in content
-        assert "from src.strategy" in content
-        assert "from src.backtest" in content
+        assert "from pages import" in content or "import pages" in content
+        # 验证不再直接导入业务逻辑模块（应该通过pages间接使用）
+        # 注意：app.py可能仍保留一些必要的导入，但主要逻辑应该在pages中
     
     def test_app_has_three_tabs(self):
         """Test that app.py has three main tabs"""
@@ -116,13 +116,18 @@ class TestUIFunctionalityBasic:
         assert "复盘验证 (Truth)" in content
     
     def test_hunter_workflow_integration(self):
-        """Test that Hunter workflow functions are callable"""
-        from src.data_provider import DataProvider
+        """Test that Hunter workflow functions are callable (使用Service层)"""
+        # 验证Service层可以导入和使用
+        from src.services import HunterService
         from src.factors import FactorPipeline, RPSFactor, MAFactor, VolumeRatioFactor, PEProxyFactor
-        from src.strategy import AlphaStrategy
-        from src.database import save_daily_predictions
         
-        # Verify all components can be imported and initialized
+        # 验证Service可以初始化
+        with patch('src.data_provider.ts'), \
+             patch.dict('os.environ', {'TUSHARE_TOKEN': 'test_token'}):
+            service = HunterService()
+            assert service is not None
+        
+        # 验证因子管道仍然可用
         pipeline = FactorPipeline()
         pipeline.add(RPSFactor(window=60))
         pipeline.add(MAFactor(window=20))
@@ -132,17 +137,58 @@ class TestUIFunctionalityBasic:
         assert len(pipeline) == 4
     
     def test_backtest_workflow_integration(self):
-        """Test that Backtest workflow functions are callable"""
+        """Test that Backtest workflow functions are callable (使用Service层)"""
+        # 验证Service层可以导入和使用
+        from src.services import BacktestService
         from src.backtest import VectorBacktester
         
-        backtester = VectorBacktester()
-        assert backtester is not None
-        assert len(backtester.factor_pipeline) == 4
+        # 验证Service可以初始化
+        with patch('src.data_provider.ts'), \
+             patch.dict('os.environ', {'TUSHARE_TOKEN': 'test_token'}):
+            service = BacktestService()
+            assert service is not None
+        
+        # 验证VectorBacktester仍然可用
+        with patch('src.data_provider.ts'), \
+             patch.dict('os.environ', {'TUSHARE_TOKEN': 'test_token'}):
+            backtester = VectorBacktester()
+            assert backtester is not None
+            assert len(backtester.factor_pipeline) == 4
     
     def test_truth_workflow_integration(self):
-        """Test that Truth workflow functions are callable"""
+        """Test that Truth workflow functions are callable (使用Service层)"""
+        # 验证Service层可以导入和使用
+        from src.services import TruthService
         from src.database import get_all_predictions, update_prediction_price
         
-        # Verify functions exist and are callable
+        # 验证Service可以初始化
+        with patch('src.data_provider.ts'), \
+             patch.dict('os.environ', {'TUSHARE_TOKEN': 'test_token'}):
+            service = TruthService()
+            assert service is not None
+            assert hasattr(service, 'update_prices')
+            assert hasattr(service, 'get_verification_data')
+            assert hasattr(service, 'calculate_win_rate')
+        
+        # 验证数据库函数仍然可用
         assert callable(get_all_predictions)
         assert callable(update_prediction_price)
+    
+    def test_pages_module_import(self):
+        """Test that pages module can be imported"""
+        from pages import render_hunter_page, render_backtest_page, render_truth_page
+        
+        assert callable(render_hunter_page)
+        assert callable(render_backtest_page)
+        assert callable(render_truth_page)
+    
+    def test_app_uses_pages(self):
+        """Test that app.py uses pages module"""
+        with open("app.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # 验证app.py使用pages模块
+        assert "from pages import" in content or "import pages" in content
+        assert "render_hunter_page" in content
+        assert "render_backtest_page" in content
+        assert "render_truth_page" in content

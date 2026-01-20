@@ -1,6 +1,15 @@
 # Environment variables
 .env
 
+
+# Process IDs (already exists, but ensure it's there)
+.pids/
+
+# Frontend build artifacts (ensure these are ignored at root level)
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+
 # Python
 __pycache__/
 *.py[cod]
@@ -36,6 +45,7 @@ tests/htmlcov/
 .ruff_cache/
 logs/
 *.log
+.pids/
 
 # Data files
 docs/*

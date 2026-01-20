@@ -210,10 +210,15 @@ def analyze_sentiment(df: pd.DataFrame, data_provider=None) -> pd.DataFrame:
         for idx, row in df.iterrows()
     ]
     
-    # 使用线程池并发执行（5个并发，考虑API限流）
+    # 使用线程池并发执行（从配置读取并发数）
     scores_dict = {}
     reasons_dict = {}
-    max_workers = 5
+    try:
+        from .config_manager import ConfigManager
+        config = ConfigManager()
+        max_workers = config.get('concurrency.ai_workers', 5)
+    except Exception:
+        max_workers = 5
     
     logger.info(f"开始并发AI评分，共 {len(score_args)} 只股票，并发数: {max_workers}")
     with ThreadPoolExecutor(max_workers=max_workers) as executor:

@@ -281,15 +281,27 @@ class DataProvider:
                 except Exception as e:
                     if attempt < max_retries - 1:
                         logger.debug(f"get_roe {code} 失败 (尝试 {attempt + 1}/{max_retries}): {e}，重试中...")
-                        time.sleep(0.5 * (attempt + 1))  # 递增延迟
+                        try:
+                            from .config_manager import ConfigManager
+                            config = ConfigManager()
+                            retry_delay = config.get('api_rate_limit.retry_delay', 0.5)
+                        except Exception:
+                            retry_delay = 0.5
+                        time.sleep(retry_delay * (attempt + 1))  # 递增延迟
                     else:
                         logger.debug(f"get_roe {code} 失败 (已重试 {max_retries} 次): {e}")
                         return None
             return None
         
-        # 并发获取ROE（10个并发，考虑Tushare API限流）
+        # 并发获取ROE（从配置读取并发数）
         out: List[dict] = []
-        max_workers = 10
+        # 尝试从配置读取，如果没有配置则使用默认值
+        try:
+            from .config_manager import ConfigManager
+            config = ConfigManager()
+            max_workers = config.get('concurrency.roe_workers', 10)
+        except Exception:
+            max_workers = 10
         
         logger.info(f"开始并发获取ROE，共 {len(ts_codes)} 只股票，并发数: {max_workers}")
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -311,8 +323,14 @@ class DataProvider:
                         logger.debug(f"get_roe {code} 任务异常: {e}")
                     finally:
                         pbar.update(1)
-                        # 保持0.2秒延迟（在并发中通过控制并发数实现限流）
-                        time.sleep(0.02)  # 每个任务完成后短暂延迟
+                        # 每个任务完成后短暂延迟（从配置读取）
+                        try:
+                            from .config_manager import ConfigManager
+                            config = ConfigManager()
+                            task_delay = config.get('api_rate_limit.task_delay', 0.02)
+                        except Exception:
+                            task_delay = 0.02
+                        time.sleep(task_delay)
         
         if not out:
             return pd.DataFrame(columns=["ts_code", "roe"])
@@ -554,8 +572,14 @@ class DataProvider:
                 if not daily_df.empty:
                     all_data.append(daily_df)
                 
-                # API限流
-                time.sleep(0.1)
+                # API限流（从配置读取延迟）
+                try:
+                    from .config_manager import ConfigManager
+                    config = ConfigManager()
+                    api_delay = config.get('api_rate_limit.tushare_delay', 0.1)
+                except Exception:
+                    api_delay = 0.1
+                time.sleep(api_delay)
                 
             except Exception as e:
                 logger.debug(f"获取 {ts_code} 数据失败: {e}")
@@ -760,8 +784,14 @@ class DataProvider:
                     if not daily_df.empty:
                         all_data.append(daily_df)
                     
-                    # API限流：短暂延迟
-                    time.sleep(0.1)
+                    # API限流（从配置读取延迟）
+                    try:
+                        from .config_manager import ConfigManager
+                        config = ConfigManager()
+                        api_delay = config.get('api_rate_limit.tushare_delay', 0.1)
+                    except Exception:
+                        api_delay = 0.1
+                    time.sleep(api_delay)
                     
                 except Exception as e:
                     logger.debug(f"获取 {ts_code} 数据失败: {e}")
@@ -805,7 +835,14 @@ class DataProvider:
                 if not daily_basic.empty:
                     daily_basic = daily_basic.rename(columns={'pe': 'pe_ttm'})
                     pe_data_list.append(daily_basic)
-                time.sleep(0.1)  # API限流
+                # API限流（从配置读取延迟）
+                try:
+                    from .config_manager import ConfigManager
+                    config = ConfigManager()
+                    api_delay = config.get('api_rate_limit.tushare_delay', 0.1)
+                except Exception:
+                    api_delay = 0.1
+                time.sleep(api_delay)
             except Exception as e:
                 logger.debug(f"获取 {trade_date} 的PE数据失败: {e}")
                 continue
