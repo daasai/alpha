@@ -113,11 +113,14 @@ class TestCalculateReturns:
         data = []
         for ts_code in ['000001.SZ']:
             for i, date in enumerate(dates):
+                base_price = 10.0 + i * 0.1
                 data.append({
                     'ts_code': ts_code,
                     'trade_date': date.strftime('%Y%m%d'),
-                    'open': 10.0 + i * 0.1,
-                    'close': 10.0 + i * 0.1 + 0.05,
+                    'open': base_price,
+                    'high': base_price + 0.1,
+                    'low': base_price - 0.05,
+                    'close': base_price + 0.05,
                     'buy_signal': 1 if i == 5 else 0  # Buy signal on day 5
                 })
         
@@ -181,6 +184,8 @@ class TestCalculateReturns:
             'ts_code': ['000001.SZ'] * 3,
             'trade_date': ['20240101', '20240102', '20240103'],
             'open': [10.0, 10.1, 10.2],
+            'high': [10.1, 10.2, 10.3],
+            'low': [9.95, 10.05, 10.15],
             'close': [10.05, 10.15, 10.25],
             'buy_signal': [1, 0, 0]
         })
@@ -291,7 +296,10 @@ class TestGetBenchmarkData:
             'close': [3000.0, 3010.0, 3005.0]
         })
         
-        backtester.data_provider._pro.index_daily.return_value = mock_index_df
+        # Mock the tushare client properly
+        backtester.data_provider._tushare_client = MagicMock()
+        backtester.data_provider._tushare_client._pro = MagicMock()
+        backtester.data_provider._tushare_client._pro.index_daily.return_value = mock_index_df
         
         result = backtester._get_benchmark_data('20240101', '20240103', '000300.SH')
         

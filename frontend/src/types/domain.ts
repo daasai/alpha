@@ -47,4 +47,4 @@ export interface TradeRecord {
   exitDate: string;
 }
 
-export type PageView = 'dashboard' | 'hunter' | 'portfolio' | 'lab';
+export type PageView = 'dashboard' | 'hunter' | 'portfolio' | 'lab' | 'settings';

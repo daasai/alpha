@@ -49,7 +49,9 @@ class PEProxyFactor(BaseFactor):
             raise ValueError("PEProxyFactor requires 'pe_ttm' column")
         
         # Boolean indicator: 0 < pe_ttm < max_pe
+        # 显式处理NaN值，确保NaN时is_undervalued=0
         df['is_undervalued'] = (
+            df['pe_ttm'].notna() & 
             (df['pe_ttm'] > 0) & 
             (df['pe_ttm'] < self.max_pe)
         ).astype(int)

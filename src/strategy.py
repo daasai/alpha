@@ -8,6 +8,7 @@ import numpy as np
 import yaml
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Dict, Any
 
 from .logging_config import get_logger
 
@@ -318,6 +319,79 @@ class AlphaStrategy:
     基于动量、价值、流动性和趋势四个维度的多因子筛选
     """
     
+    @staticmethod
+    def check_market_regime(trade_date: str, data_provider, index_code: str = "000001.SH", config=None) -> "Dict[str, Any]":
+        """
+        检查市场状态（使用BBIFactor）
+        
+        Args:
+            trade_date: 交易日期 (YYYYMMDD)
+            data_provider: DataProvider实例
+            index_code: 指数代码，默认上证指数
+            config: ConfigManager实例，如果为None则创建新实例
+            
+        Returns:
+            包含is_bull (bool) 和 bbi_signal (int) 的字典
+        """
+        from datetime import datetime, timedelta
+        from .factors import BBIFactor
+        
+        # 获取配置
+        if config is None:
+            from .config_manager import ConfigManager
+            config = ConfigManager()
+        
+        try:
+            # 获取最近60天的指数数据（用于计算BBI）
+            end_date = trade_date
+            start_date = (datetime.strptime(trade_date, "%Y%m%d") - timedelta(days=60)).strftime("%Y%m%d")
+            
+            # 获取指数日线数据
+            index_df = data_provider._tushare_client._pro.index_daily(
+                ts_code=index_code,
+                start_date=start_date,
+                end_date=end_date,
+                fields="trade_date,close"
+            )
+            
+            if index_df.empty:
+                logger.warning(f"无法获取指数数据 ({index_code})，默认返回多头市场")
+                return {"is_bull": True, "bbi_signal": 1}
+            
+            # 处理数据
+            index_df = index_df.sort_values('trade_date').reset_index(drop=True)
+            index_df['close'] = pd.to_numeric(index_df['close'], errors='coerce')
+            index_df['trade_date'] = pd.to_datetime(index_df['trade_date'], format='%Y%m%d', errors='coerce')
+            
+            # 应用BBIFactor（从配置读取参数）
+            bbi_ma_windows = config.get('factors.bbi.ma_windows', [3, 6, 12, 24])
+            bbi_confirmation_days = config.get('factors.bbi.confirmation_days', 3)
+            bbi_factor = BBIFactor(ma_windows=bbi_ma_windows, confirmation_days=bbi_confirmation_days)
+            index_df = bbi_factor.compute(index_df)
+            
+            # 获取最新（目标交易日）的BBI信号
+            target_date = pd.to_datetime(trade_date, format='%Y%m%d', errors='coerce')
+            if target_date in index_df['trade_date'].values:
+                latest_row = index_df[index_df['trade_date'] == target_date].iloc[-1]
+            else:
+                # 如果目标日期不在数据中，使用最新数据
+                latest_row = index_df.iloc[-1]
+            
+            bbi_signal = int(latest_row['bbi_signal']) if pd.notna(latest_row['bbi_signal']) else 1
+            is_bull = (bbi_signal == 1)
+            
+            logger.debug(f"市场状态检查 ({trade_date}): BBI信号={bbi_signal}, 是否多头={is_bull}")
+            
+            return {
+                "is_bull": is_bull,
+                "bbi_signal": bbi_signal
+            }
+            
+        except Exception as e:
+            logger.error(f"检查市场状态失败: {e}")
+            # 默认返回多头市场（保守策略）
+            return {"is_bull": True, "bbi_signal": 1}
+    
     def __init__(self, enriched_df: pd.DataFrame, config=None):
         """
         初始化Alpha策略
@@ -346,9 +420,9 @@ class AlphaStrategy:
         """
         Alpha Trident筛选逻辑：
         1. rps_60 > threshold (从配置读取，默认85)
-        2. is_undervalued == True
+        2. is_undervalued == 1
         3. vol_ratio_5 > threshold (从配置读取，默认1.5)
-        4. above_ma_20 == True
+        4. above_ma_20 == 1
         
         Returns:
             DataFrame: 筛选后的股票，按rps_60降序排序
@@ -378,10 +452,10 @@ class AlphaStrategy:
             logger.warning("filter_alpha_trident: 动量筛选后无数据")
             return pd.DataFrame()
         
-        # 筛选条件2: is_undervalued == True
+        # 筛选条件2: is_undervalued == 1
         before_value = len(df)
-        df = df[df['is_undervalued'] == True]
-        logger.debug(f"价值筛选 (is_undervalued == True): {before_value} -> {len(df)}")
+        df = df[df['is_undervalued'] == 1]
+        logger.debug(f"价值筛选 (is_undervalued == 1): {before_value} -> {len(df)}")
         
         if df.empty:
             logger.warning("filter_alpha_trident: 价值筛选后无数据")
@@ -396,17 +470,17 @@ class AlphaStrategy:
             logger.warning("filter_alpha_trident: 流动性筛选后无数据")
             return pd.DataFrame()
         
-        # 筛选条件4: above_ma_20 == True
+        # 筛选条件4: above_ma_20 == 1
         before_trend = len(df)
-        df = df[df['above_ma_20'] == True]
-        logger.debug(f"趋势筛选 (above_ma_20 == True): {before_trend} -> {len(df)}")
+        df = df[df['above_ma_20'] == 1]
+        logger.debug(f"趋势筛选 (above_ma_20 == 1): {before_trend} -> {len(df)}")
         
         if df.empty:
             logger.warning("filter_alpha_trident: 趋势筛选后无数据")
             return pd.DataFrame()
         
-        # 按rps_60降序排序
-        df = df.sort_values('rps_60', ascending=False).reset_index(drop=True)
+        # 按rps_60降序排序，添加ts_code作为二级排序键确保稳定性（确保NaN值在最后）
+        df = df.sort_values(['rps_60', 'ts_code'], ascending=[False, True], na_position='last').reset_index(drop=True)
         
         # 添加 strategy_tag 列（所有通过 Alpha Trident 筛选的股票都是强推荐）
         df['strategy_tag'] = '🚀 强推荐'

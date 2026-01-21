@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { ResponsiveContainer, ComposedChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
-import { ArrowUp } from 'lucide-react';
+import { ArrowUp, ArrowDown } from 'lucide-react';
 import { useDashboardOverview, useMarketTrend } from '../../hooks/useDashboard';
 import { useDashboardStore } from '../../store/dashboardStore';
 import { SkeletonCard, SkeletonChart } from '../common/Loading';
@@ -10,25 +10,53 @@ const Dashboard: React.FC = () => {
   const { showToast } = useToast();
   const { overview, marketTrend } = useDashboardStore();
   
+  // 数据来源：通过 useDashboardOverview 和 useMarketTrend hooks
+  // 这些hooks调用后端API: /api/dashboard/overview 和 /api/dashboard/market-trend
+  // 数据从后端 DashboardService 获取，包括：
+  // - 市场状态：从Tushare API获取指数数据计算BBI
+  // - 组合净值：从数据库 portfolio_positions 表计算
+  // - 市场趋势：从Tushare API获取指数日线数据
   const { loading: overviewLoading, error: overviewError } = useDashboardOverview();
   const { loading: trendLoading, error: trendError } = useMarketTrend(60);
 
   useEffect(() => {
     if (overviewError) {
-      showToast('获取市场概览失败', 'error');
+      showToast('获取市场概览失败 (Failed to fetch market overview)', 'error');
     }
   }, [overviewError, showToast]);
 
   useEffect(() => {
     if (trendError) {
-      showToast('获取市场趋势失败', 'error');
+      showToast('获取市场趋势失败 (Failed to fetch market trend)', 'error');
     }
   }, [trendError, showToast]);
+
+  // 开发环境下验证数据来源
+  useEffect(() => {
+    if (import.meta.env.DEV && overview) {
+      console.log('[Dashboard] 数据来源验证:', {
+        source: '后端API /api/dashboard/overview',
+        data: overview,
+        timestamp: new Date().toISOString()
+      });
+    }
+  }, [overview]);
+
+  useEffect(() => {
+    if (import.meta.env.DEV && marketTrend) {
+      console.log('[Dashboard] 市场趋势数据来源验证:', {
+        source: '后端API /api/dashboard/market-trend',
+        dataPoints: marketTrend.data?.length || 0,
+        indexCode: marketTrend.index_code,
+        timestamp: new Date().toISOString()
+      });
+    }
+  }, [marketTrend]);
 
   // Calculate stats from overview data
   const isBull = overview?.market_regime?.is_bull ?? false;
   const regimeColor = isBull ? 'text-ashare-red' : 'text-ashare-green';
-  const regimeLabel = isBull ? '🟢 多头 (进攻)' : '🔴 空头 (防守)';
+  const regimeLabel = isBull ? '🟢 多头 (Bull)' : '🔴 空头 (Bear)';
 
   // Prepare chart data
   const chartData = marketTrend?.data?.map(item => ({
@@ -46,7 +74,7 @@ const Dashboard: React.FC = () => {
         {/* Header */}
         <div>
           <h2 className="text-2xl font-bold text-gray-900">驾驶舱 (Dashboard)</h2>
-          <p className="text-gray-500 text-sm mt-1">Today's Morning Briefing</p>
+          <p className="text-gray-500 text-sm mt-1">今日早报 (Daily Briefing)</p>
         </div>
 
         {/* Top Row: KPI Cards */}
@@ -60,11 +88,11 @@ const Dashboard: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
             {/* Market Regime */}
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-between h-32">
-              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Market Regime</span>
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">市场状态 (Market Regime)</span>
               <div className={`text-xl font-bold ${regimeColor} flex items-center gap-2`}>
                 {regimeLabel}
               </div>
-              <div className="text-xs text-gray-400">Trend is your friend</div>
+              <div className="text-xs text-gray-400">趋势是你的朋友 (Trend is Your Friend)</div>
             </div>
 
             {/* Sentiment */}
@@ -92,30 +120,34 @@ const Dashboard: React.FC = () => {
 
             {/* Target Position */}
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-between h-32">
-              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Target Position</span>
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">目标仓位 (Target Position)</span>
               <div className="flex items-center gap-3">
                 <span className="text-3xl font-bold text-gray-900">
                   {overview?.target_position?.position || 0}%
                 </span>
                 <span className="bg-ashare-red/10 text-ashare-red px-2 py-0.5 rounded text-xs font-medium">
-                  {overview?.target_position?.label || 'N/A'}
+                  {overview?.target_position?.label === 'Full On' ? '满仓 (Full On)' : overview?.target_position?.label === 'Defensive' ? '防守 (Defensive)' : overview?.target_position?.label || 'N/A'}
                 </span>
               </div>
-              <div className="text-xs text-gray-400">Based on signal strength</div>
+              <div className="text-xs text-gray-400">基于信号强度 (Based on Signal Strength)</div>
             </div>
 
             {/* Portfolio NAV */}
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-between h-32">
-              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Portfolio NAV</span>
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">组合净值 (Portfolio NAV)</span>
               <div className="flex items-baseline gap-2">
                 <span className="text-2xl font-bold text-gray-900">
                   ¥{overview?.portfolio_nav?.nav?.toLocaleString() || '0'}
                 </span>
               </div>
-               {overview?.portfolio_nav?.change_percent && (
-                 <div className="flex items-center text-xs text-ashare-red">
-                   <ArrowUp size={12} className="mr-1" />
-                   <span>{overview.portfolio_nav.change_percent > 0 ? '+' : ''}{overview.portfolio_nav.change_percent.toFixed(1)}% Today</span>
+               {overview?.portfolio_nav?.change_percent !== undefined && (
+                 <div className={`flex items-center text-xs ${overview.portfolio_nav.change_percent >= 0 ? 'text-ashare-red' : 'text-ashare-green'}`}>
+                   {overview.portfolio_nav.change_percent >= 0 ? (
+                     <ArrowUp size={12} className="mr-1" />
+                   ) : (
+                     <ArrowDown size={12} className="mr-1" />
+                   )}
+                   <span>{overview.portfolio_nav.change_percent > 0 ? '+' : ''}{overview.portfolio_nav.change_percent.toFixed(1)}% 今日 (Today)</span>
                  </div>
                )}
             </div>
@@ -129,16 +161,16 @@ const Dashboard: React.FC = () => {
           <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 min-h-[500px]">
             <div className="flex justify-between items-center mb-6">
               <h3 className="text-lg font-bold text-gray-800">
-                {marketTrend?.index_name || '上证指数'} ({marketTrend?.index_code || '000001.SH'}) vs BBI Trend
+                {marketTrend?.index_name || '上证指数'} ({marketTrend?.index_code || '000001.SH'}) vs BBI趋势
               </h3>
               <div className="flex gap-4 text-sm">
                 <div className="flex items-center gap-2">
                   <div className="w-3 h-3 bg-gray-800 rounded-full"></div>
-                  <span className="text-gray-600">Price</span>
+                  <span className="text-gray-600">价格 (Price)</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
-                  <span className="text-gray-600">BBI</span>
+                  <span className="text-gray-600">BBI指标 (BBI Indicator)</span>
                 </div>
               </div>
             </div>
@@ -178,7 +210,7 @@ const Dashboard: React.FC = () => {
                       strokeWidth={2} 
                       dot={false}
                       activeDot={{ r: 6 }}
-                      name="Close Price"
+                      name="收盘价 (Close Price)"
                     />
                     <Line 
                       type="monotone" 
@@ -187,14 +219,14 @@ const Dashboard: React.FC = () => {
                       strokeWidth={2} 
                       dot={false} 
                       strokeDasharray="5 5"
-                      name="BBI Indicator"
+                      name="BBI指标 (BBI Indicator)"
                     />
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
             ) : (
               <div className="h-[400px] flex items-center justify-center text-gray-400">
-                暂无数据
+                暂无数据 (No Data)
               </div>
             )}
           </div>

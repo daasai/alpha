@@ -23,11 +23,14 @@ class TestReturnCalculationAccuracy:
         data = []
         for ts_code in ['000001.SZ']:
             for i, date in enumerate(dates):
+                base_price = 10.0 + i * 0.1
                 data.append({
                     'ts_code': ts_code,
                     'trade_date': date.strftime('%Y%m%d'),
-                    'open': 10.0 + i * 0.1,
-                    'close': 10.0 + i * 0.1 + 0.05,
+                    'open': base_price,
+                    'high': base_price + 0.1,
+                    'low': base_price - 0.05,
+                    'close': base_price + 0.05,
                     'vol': 1000000,
                     'pe_ttm': 15.0
                 })
@@ -76,11 +79,14 @@ class TestReturnCalculationAccuracy:
         
         data = []
         for i, date in enumerate(dates):
+            base_price = 10.0 + i * 0.1
             data.append({
                 'ts_code': '000001.SZ',
                 'trade_date': date.strftime('%Y%m%d'),
-                'open': 10.0 + i * 0.1,
-                'close': 10.0 + i * 0.1 + 0.05,
+                'open': base_price,
+                'high': base_price + 0.1,
+                'low': base_price - 0.05,
+                'close': base_price + 0.05,
                 'vol': 1000000,
                 'pe_ttm': 15.0,
                 'buy_signal': 1 if i == 5 else 0  # Buy signal on day 5

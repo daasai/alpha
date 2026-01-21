@@ -1,12 +1,15 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
+import type React from 'react';
 import { BrowserRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { ToastProvider } from './components/common/Toast';
+import { GlobalProvider } from './components/common/GlobalProvider';
 import Sidebar from '../components/Sidebar';
 import Dashboard from './components/pages/Dashboard';
 import Hunter from './components/pages/Hunter';
 import Portfolio from './components/pages/Portfolio';
 import Lab from './components/pages/Lab';
+import Settings from './components/pages/Settings';
 import { PageView } from './types/domain';
 import { Menu } from 'lucide-react';
 
@@ -22,6 +25,7 @@ const AppContent: React.FC = () => {
     if (path === '/hunter') return 'hunter';
     if (path === '/portfolio') return 'portfolio';
     if (path === '/lab') return 'lab';
+    if (path === '/settings') return 'settings';
     return 'dashboard';
   };
 
@@ -42,6 +46,9 @@ const AppContent: React.FC = () => {
         break;
       case 'lab':
         navigate('/lab');
+        break;
+      case 'settings':
+        navigate('/settings');
         break;
     }
   };
@@ -82,7 +89,11 @@ const AppContent: React.FC = () => {
         {/* Mobile Header */}
         <div className="md:hidden p-4 bg-white border-b border-gray-200 flex items-center justify-between shrink-0 z-30">
           <div className="flex items-center gap-2">
-            <span className="text-xl">🛰️</span>
+            <img 
+              src="/logo/favicon-32x32.png" 
+              alt="DAAS Alpha Logo" 
+              className="w-6 h-6"
+            />
             <span className="font-bold text-gray-900">DAAS Alpha</span>
           </div>
           <button 
@@ -101,6 +112,7 @@ const AppContent: React.FC = () => {
             <Route path="/hunter" element={<Hunter />} />
             <Route path="/portfolio" element={<Portfolio />} />
             <Route path="/lab" element={<Lab />} />
+            <Route path="/settings" element={<Settings />} />
           </Routes>
         </div>
       </main>
@@ -112,11 +124,13 @@ const AppContent: React.FC = () => {
 const App: React.FC = () => {
   return (
     <ErrorBoundary>
-      <ToastProvider>
-        <BrowserRouter>
-          <AppContent />
-        </BrowserRouter>
-      </ToastProvider>
+      <GlobalProvider>
+        <ToastProvider>
+          <BrowserRouter>
+            <AppContent />
+          </BrowserRouter>
+        </ToastProvider>
+      </GlobalProvider>
     </ErrorBoundary>
   );
 };

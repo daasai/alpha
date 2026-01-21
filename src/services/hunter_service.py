@@ -82,6 +82,9 @@ class HunterService(BaseService):
             if trade_date is None:
                 trade_date = get_trade_date()
             
+            # 保存原始trade_date，用于后续判断是否更新
+            original_trade_date = trade_date
+            
             logger.info(f"Hunter 扫描开始，交易日期: {trade_date}")
             
             # 2. 获取基础数据
@@ -124,6 +127,27 @@ class HunterService(BaseService):
                 basic_df['trade_date'] = basic_df['trade_date'].astype(str)
             
             daily_df = history_df[history_df['trade_date'] == trade_date].copy()
+            
+            # 数据完整性验证（Bug #10修复）
+            if not daily_df.empty:
+                # 检查数据质量
+                nan_close_count = daily_df['close'].isna().sum()
+                nan_vol_count = daily_df['vol'].isna().sum()
+                
+                if nan_close_count > 0:
+                    logger.warning(f"发现 {nan_close_count} 只股票收盘价为NaN，将过滤这些记录")
+                    daily_df = daily_df[daily_df['close'].notna()].copy()
+                
+                if nan_vol_count > 0:
+                    logger.warning(f"发现 {nan_vol_count} 只股票成交量为NaN")
+                
+                # 检查异常值
+                if 'close' in daily_df.columns:
+                    zero_close_count = (daily_df['close'] <= 0).sum()
+                    if zero_close_count > 0:
+                        logger.warning(f"发现 {zero_close_count} 只股票收盘价<=0，将过滤这些记录")
+                        daily_df = daily_df[daily_df['close'] > 0].copy()
+            
             if daily_df.empty:
                 logger.warning(f"目标交易日 {trade_date} 无数据，尝试使用最近交易日")
                 # 尝试使用历史数据中的最近交易日
@@ -134,6 +158,36 @@ class HunterService(BaseService):
                         logger.info(f"使用最近交易日: {latest_date}")
                         daily_df = history_df[history_df['trade_date'] == latest_date].copy()
                         trade_date = latest_date  # 更新trade_date为实际使用的日期
+                        
+                        # 重要：如果trade_date已更新，需要过滤history_df确保只包含<=新trade_date的数据
+                        if trade_date != original_trade_date:
+                            # 确保history_df只包含<=新trade_date的数据
+                            history_df = history_df[history_df['trade_date'] <= trade_date].copy()
+                            logger.info(f"已过滤history_df，仅保留<= {trade_date} 的数据")
+                        
+                        # 重要：如果trade_date已更新，需要重新获取basic_df或过滤basic_df
+                        # 因为basic_df可能包含的是原始trade_date的数据
+                        # 先尝试过滤basic_df，如果为空则重新获取
+                        basic_df_filtered = basic_df[basic_df['trade_date'] == trade_date].copy()
+                        if basic_df_filtered.empty:
+                            logger.info(f"basic_df中没有{trade_date}的数据，尝试重新获取")
+                            try:
+                                basic_df_new = self.data_provider.get_daily_basic(trade_date)
+                                if basic_df_new.empty:
+                                    logger.warning(f"重新获取{trade_date}的基础数据也为空，将导致合并失败")
+                                    # 继续使用原始basic_df，但会在合并时失败并给出更明确的错误信息
+                                else:
+                                    # 确保trade_date格式一致
+                                    if basic_df_new['trade_date'].dtype != 'object':
+                                        basic_df_new['trade_date'] = basic_df_new['trade_date'].astype(str)
+                                    basic_df = basic_df_new
+                                    logger.info(f"成功重新获取{trade_date}的基础数据: {len(basic_df)} 条")
+                            except Exception as e:
+                                logger.error(f"重新获取基础数据失败: {e}，合并将失败")
+                                # 继续使用原始basic_df，但会在合并时失败
+                        else:
+                            basic_df = basic_df_filtered
+                            logger.info(f"从原始basic_df中过滤出{trade_date}的数据: {len(basic_df)} 条")
             
             if daily_df.empty:
                 return HunterResult(
@@ -141,11 +195,30 @@ class HunterService(BaseService):
                     error="无法获取目标交易日数据"
                 )
             
+            # 添加诊断信息，帮助排查合并问题
+            logger.debug(f"合并前: basic_df={len(basic_df)}条, daily_df={len(daily_df)}条")
+            logger.debug(f"basic_df的trade_date唯一值: {basic_df['trade_date'].unique()[:5] if not basic_df.empty else 'empty'}")
+            logger.debug(f"daily_df的trade_date唯一值: {daily_df['trade_date'].unique()[:5] if not daily_df.empty else 'empty'}")
+            logger.debug(f"basic_df的ts_code数量: {basic_df['ts_code'].nunique() if not basic_df.empty else 0}")
+            logger.debug(f"daily_df的ts_code数量: {daily_df['ts_code'].nunique() if not daily_df.empty else 0}")
+            
             merged_df = basic_df.merge(daily_df, on=["ts_code", "trade_date"], how="inner")
             if merged_df.empty:
+                # 提供更详细的错误信息
+                basic_codes = set(basic_df['ts_code'].unique()) if not basic_df.empty else set()
+                daily_codes = set(daily_df['ts_code'].unique()) if not daily_df.empty else set()
+                common_codes = basic_codes & daily_codes
+                basic_dates = set(basic_df['trade_date'].unique()) if not basic_df.empty else set()
+                daily_dates = set(daily_df['trade_date'].unique()) if not daily_df.empty else set()
+                
+                logger.error(f"数据合并失败: basic_df={len(basic_df)}条, daily_df={len(daily_df)}条")
+                logger.error(f"basic_df的trade_date: {basic_dates}, daily_df的trade_date: {daily_dates}")
+                logger.error(f"basic_df的ts_code数量: {len(basic_codes)}, daily_df的ts_code数量: {len(daily_codes)}")
+                logger.error(f"共同ts_code数量: {len(common_codes)}")
+                
                 return HunterResult(
                     success=False,
-                    error="数据合并失败"
+                    error=f"数据合并失败: basic_df和daily_df在trade_date={trade_date}时无匹配记录"
                 )
             
             # 5. 准备因子计算数据（包含历史数据）
@@ -156,10 +229,23 @@ class HunterService(BaseService):
             stock_data_counts = history_for_factors.groupby('ts_code').size()
             stocks_with_enough_data = (stock_data_counts >= 60).sum()
             
+            # 过滤数据不足的股票（Bug #4修复）
+            min_required_data_points = 60  # 与RPS window一致
+            valid_stocks = stock_data_counts[stock_data_counts >= min_required_data_points].index
+            history_for_factors = history_for_factors[
+                history_for_factors['ts_code'].isin(valid_stocks)
+            ].copy()
+            logger.info(f"过滤数据不足的股票: {len(valid_stocks)}/{len(stock_data_counts)} 只股票有≥{min_required_data_points}条数据")
+            
+            # 更新valid_codes
+            valid_codes = set(valid_stocks)
+            
             # 合并历史数据到 merged_df（用于因子计算）
+            # 先排序确保稳定性，然后去重
             basic_df_unique = basic_df[
                 ['ts_code', 'name', 'list_date', 'pe_ttm', 'pb', 'mv', 'dividend_yield']
-            ].drop_duplicates(subset=['ts_code'], keep='first')
+            ].sort_values(['ts_code']).reset_index(drop=True)
+            basic_df_unique = basic_df_unique.drop_duplicates(subset=['ts_code'], keep='first')
             
             merged_df = history_for_factors.merge(
                 basic_df_unique,
@@ -210,14 +296,22 @@ class HunterService(BaseService):
             if 'rps_60' in enriched_df.columns:
                 rps_valid = enriched_df['rps_60'].notna().sum()
                 if rps_valid > 0:
+                    rps_series = enriched_df['rps_60']
+                    # 确保RPS值在0-100范围内（处理可能的异常值）
+                    rps_clamped = rps_series.clip(lower=0.0, upper=100.0)
                     diagnostics['rps_stats'] = {
                         'valid_count': int(rps_valid),
                         'total_count': len(enriched_df),
-                        'max': float(enriched_df['rps_60'].max()),
-                        'min': float(enriched_df['rps_60'].min()),
-                        'mean': float(enriched_df['rps_60'].mean()),
-                        'above_85': int((enriched_df['rps_60'] > 85).sum())
+                        'max': float(rps_clamped.max()),
+                        'min': float(rps_clamped.min()),
+                        'mean': float(rps_clamped.mean()),
+                        'above_85': int((rps_clamped > 85).sum())
                     }
+                    
+                    # 检查是否有超出范围的RPS值
+                    out_of_range = ((rps_series < 0) | (rps_series > 100)).sum()
+                    if out_of_range > 0:
+                        logger.warning(f"发现 {out_of_range} 个RPS值超出0-100范围，已自动修正")
             
             logger.info(f"Hunter 扫描完成: {len(result_df)} 只股票")
             
@@ -316,8 +410,9 @@ class HunterService(BaseService):
             enriched_df['trade_date'] = enriched_df['trade_date'].astype(str)
             target_date_df = enriched_df[enriched_df['trade_date'] == trade_date].copy()
         
-        # 去重
+        # 去重（先排序确保稳定性）
         before_dedup = len(target_date_df)
+        target_date_df = target_date_df.sort_values(['ts_code']).reset_index(drop=True)
         target_date_df = target_date_df.drop_duplicates(subset=['ts_code'], keep='first')
         if len(target_date_df) < before_dedup:
             logger.warning(f"发现重复股票记录，已去重: {before_dedup} -> {len(target_date_df)}")

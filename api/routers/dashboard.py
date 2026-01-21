@@ -4,7 +4,7 @@ Dashboard API Router
 from fastapi import APIRouter, Depends, Query
 from typing import Optional
 
-from api.dependencies import get_data_provider, get_config
+from api.dependencies import get_data_provider, get_config, get_portfolio_repository
 from api.services.dashboard_service import DashboardService
 from api.schemas.dashboard import (
     DashboardOverviewResponse,
@@ -13,16 +13,18 @@ from api.schemas.dashboard import (
 from api.utils.responses import success_response
 from src.data_provider import DataProvider
 from src.config_manager import ConfigManager
+from src.repositories.portfolio_repository import PortfolioRepository
 
 router = APIRouter()
 
 
 def get_dashboard_service(
     data_provider: DataProvider = Depends(get_data_provider),
-    config: ConfigManager = Depends(get_config)
+    config: ConfigManager = Depends(get_config),
+    portfolio_repository: PortfolioRepository = Depends(get_portfolio_repository)
 ) -> DashboardService:
     """获取Dashboard服务实例"""
-    return DashboardService(data_provider, config)
+    return DashboardService(data_provider, config, portfolio_repository)
 
 
 @router.get("/overview", response_model=DashboardOverviewResponse)

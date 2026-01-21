@@ -29,7 +29,8 @@ class APILabService:
         cost_rate: float = 0.002,
         benchmark_code: str = "000300.SH",
         index_code: Optional[str] = None,
-        max_positions: Optional[int] = None
+        max_positions: Optional[int] = None,
+        rps_threshold: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         运行回测
@@ -43,62 +44,37 @@ class APILabService:
             benchmark_code: 基准指数代码
             index_code: 股票池指数代码
             max_positions: 最大持仓数
+            rps_threshold: RPS阈值，默认使用配置值
             
         Returns:
             回测结果字典
         """
         try:
-            # 如果提供了max_positions，临时更新配置
-            original_max_positions = None
-            if max_positions is not None:
-                # 尝试多个配置路径
-                original_max_positions = self.core_service.config.get('strategy.backtest.max_positions') or \
-                                        self.core_service.config.get('backtest.max_positions')
-                # 确保配置字典存在
-                if 'strategy' not in self.core_service.config.config:
-                    self.core_service.config.config['strategy'] = {}
-                if 'backtest' not in self.core_service.config.config['strategy']:
-                    self.core_service.config.config['strategy']['backtest'] = {}
-                self.core_service.config.config['strategy']['backtest']['max_positions'] = max_positions
+            # 直接传递参数，不再临时修改配置
+            result: BacktestResult = self.core_service.run_backtest(
+                start_date=start_date,
+                end_date=end_date,
+                holding_days=holding_days,
+                stop_loss_pct=stop_loss_pct,
+                cost_rate=cost_rate,
+                benchmark_code=benchmark_code,
+                index_code=index_code,
+                rps_threshold=rps_threshold,
+                max_positions=max_positions
+            )
             
-            try:
-                # 执行回测
-                result: BacktestResult = self.core_service.run_backtest(
-                    start_date=start_date,
-                    end_date=end_date,
-                    holding_days=holding_days,
-                    stop_loss_pct=stop_loss_pct,
-                    cost_rate=cost_rate,
-                    benchmark_code=benchmark_code,
-                    index_code=index_code
-                )
-                
-                # 恢复原始配置
-                if original_max_positions is not None:
-                    if 'strategy' in self.core_service.config.config and \
-                       'backtest' in self.core_service.config.config['strategy']:
-                        self.core_service.config.config['strategy']['backtest']['max_positions'] = original_max_positions
-                
-                if not result.success:
-                    return {
-                        "success": False,
-                        "metrics": None,
-                        "equity_curve": [],
-                        "top_winners": [],
-                        "top_losers": [],
-                        "error": result.error
-                    }
-                
-                # 转换结果
-                return self._format_backtest_results(result.results)
-                
-            except Exception as e:
-                # 恢复原始配置
-                if original_max_positions is not None:
-                    if 'strategy' in self.core_service.config.config and \
-                       'backtest' in self.core_service.config.config['strategy']:
-                        self.core_service.config.config['strategy']['backtest']['max_positions'] = original_max_positions
-                raise
+            if not result.success:
+                return {
+                    "success": False,
+                    "metrics": None,
+                    "equity_curve": [],
+                    "top_winners": [],
+                    "top_losers": [],
+                    "error": result.error
+                }
+            
+            # 转换结果
+            return self._format_backtest_results(result.results)
                 
         except Exception as e:
             logger.exception(f"回测异常: {type(e).__name__}: {str(e)}")
@@ -130,28 +106,49 @@ class APILabService:
             if isinstance(ec, pd.Series):
                 # 如果是Series，索引是trade_date，值是equity（归一化的净值）
                 if not ec.empty:
-                    # 计算基准净值曲线（从benchmark_metrics或使用默认值）
-                    benchmark_initial = 1.0
-                    benchmark_metrics = results.get('benchmark_metrics', {})
-                    benchmark_total_return = benchmark_metrics.get('total_return', 0.0) / 100.0
-                    
-                    # 简单线性插值基准净值（实际应该从benchmark数据计算）
-                    dates = list(ec.index)
-                    if len(dates) > 1:
-                        benchmark_final = 1.0 + benchmark_total_return
-                        benchmark_values = np.linspace(benchmark_initial, benchmark_final, len(dates))
+                    # 使用实际的基准净值曲线（如果存在）
+                    benchmark_ec = results.get('benchmark_equity_curve')
+                    if benchmark_ec is not None and isinstance(benchmark_ec, pd.Series) and not benchmark_ec.empty:
+                        # 对齐基准净值曲线到策略日期
+                        for date, strategy_val in ec.items():
+                            # 找到最接近的基准日期
+                            benchmark_val = 1.0
+                            if date in benchmark_ec.index:
+                                benchmark_val = float(benchmark_ec[date])
+                            else:
+                                # 前向填充：找到小于等于date的最大基准日期
+                                valid_dates = benchmark_ec.index[benchmark_ec.index <= date]
+                                if len(valid_dates) > 0:
+                                    benchmark_val = float(benchmark_ec[valid_dates[-1]])
+                            
+                            date_str = date.strftime("%Y-%m-%d") if hasattr(date, 'strftime') else str(date)
+                            equity_curve.append({
+                                "date": date_str,
+                                "strategy_equity": float(strategy_val),
+                                "benchmark_equity": benchmark_val
+                            })
                     else:
-                        benchmark_values = [benchmark_initial]
-                    
-                    for i, (date, strategy_val) in enumerate(ec.items()):
-                        benchmark_val = float(benchmark_values[i]) if i < len(benchmark_values) else benchmark_initial
+                        # Fallback: 使用线性插值（如果基准数据不可用）
+                        benchmark_initial = 1.0
+                        benchmark_metrics = results.get('benchmark_metrics', {})
+                        benchmark_total_return = benchmark_metrics.get('total_return', 0.0) / 100.0
                         
-                        date_str = date.strftime("%Y-%m-%d") if hasattr(date, 'strftime') else str(date)
-                        equity_curve.append({
-                            "date": date_str,
-                            "strategy_equity": float(strategy_val),
-                            "benchmark_equity": benchmark_val
-                        })
+                        dates = list(ec.index)
+                        if len(dates) > 1:
+                            benchmark_final = 1.0 + benchmark_total_return
+                            benchmark_values = np.linspace(benchmark_initial, benchmark_final, len(dates))
+                        else:
+                            benchmark_values = [benchmark_initial]
+                        
+                        for i, (date, strategy_val) in enumerate(ec.items()):
+                            benchmark_val = float(benchmark_values[i]) if i < len(benchmark_values) else benchmark_initial
+                            
+                            date_str = date.strftime("%Y-%m-%d") if hasattr(date, 'strftime') else str(date)
+                            equity_curve.append({
+                                "date": date_str,
+                                "strategy_equity": float(strategy_val),
+                                "benchmark_equity": benchmark_val
+                            })
             elif isinstance(ec, pd.DataFrame) and not ec.empty:
                 # 如果是DataFrame
                 for _, row in ec.iterrows():
@@ -171,11 +168,9 @@ class APILabService:
         if 'top_contributors' in results and not results['top_contributors'].empty:
             contributors = results['top_contributors']
             
-            # 按总收益排序
-            contributors_sorted = contributors.sort_values('total_gain', ascending=False)
-            
-            # Top 3 Winners
-            winners = contributors_sorted.head(3)
+            # Top 3 Winners: 按总收益百分比降序排序，取前3个（最高收益）
+            contributors_sorted_desc = contributors.sort_values('total_gain_pct', ascending=False)
+            winners = contributors_sorted_desc.head(3)
             for _, row in winners.iterrows():
                 top_winners.append({
                     "code": str(row.get('ts_code', '')),
@@ -184,8 +179,9 @@ class APILabService:
                     "total_gain_pct": float(row.get('total_gain_pct', 0))
                 })
             
-            # Top 3 Losers
-            losers = contributors_sorted.tail(3)
+            # Top 3 Losers: 按总收益百分比升序排序，取前3个（最低收益，即最负的）
+            contributors_sorted_asc = contributors.sort_values('total_gain_pct', ascending=True)
+            losers = contributors_sorted_asc.head(3)
             for _, row in losers.iterrows():
                 top_losers.append({
                     "code": str(row.get('ts_code', '')),

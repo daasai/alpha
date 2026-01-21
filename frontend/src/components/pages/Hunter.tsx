@@ -5,7 +5,7 @@ import { useHunterFilters, useHunterScan } from '../../hooks/useHunter';
 import { useHunterStore } from '../../store/hunterStore';
 import { SkeletonTable } from '../common/Loading';
 import { useToast } from '../common/Toast';
-import * as portfolioApi from '../../api/services/portfolio';
+import QuickBuyModal from '../common/QuickBuyModal';
 
 const Hunter: FC = () => {
   const { showToast } = useToast();
@@ -13,13 +13,16 @@ const Hunter: FC = () => {
   const { 
     results, 
     rpsThreshold, 
-    volumeRatio, 
+    volumeRatio,
+    tradeDate,
+    filters,
     setRpsThreshold, 
-    setVolumeRatio
+    setVolumeRatio,
+    setTradeDate
   } = useHunterStore();
   
   const [isFiltersOpen, setIsFiltersOpen] = useState(true);
-  const [addingToPortfolio, setAddingToPortfolio] = useState<string | null>(null);
+  const [quickBuyStock, setQuickBuyStock] = useState<{ code: string; name: string; price: number } | null>(null);
   const { scan, loading: scanLoading, error: scanError } = useHunterScan();
   const { loading: filtersLoading } = useHunterFilters();
 
@@ -27,7 +30,7 @@ const Hunter: FC = () => {
 
   useEffect(() => {
     if (scanError) {
-      const errorMessage = scanError.message || '扫描失败';
+      const errorMessage = scanError.message || '扫描失败 (Scan Failed)';
       showToast(errorMessage, 'error');
     }
   }, [scanError, showToast]);
@@ -37,6 +40,7 @@ const Hunter: FC = () => {
     const autoScan = searchParams.get('autoScan') === 'true';
     if (autoScan) {
       scan({
+        trade_date: tradeDate || undefined,
         rps_threshold: rpsThreshold,
         volume_ratio_threshold: volumeRatio,
       });
@@ -47,39 +51,22 @@ const Hunter: FC = () => {
         return newParams;
       });
     }
-  }, [searchParams, scan, rpsThreshold, volumeRatio, setSearchParams]);
+  }, [searchParams, scan, tradeDate, rpsThreshold, volumeRatio, setSearchParams]);
 
   const handleScan = () => {
     scan({
+      trade_date: tradeDate || undefined,
       rps_threshold: rpsThreshold,
       volume_ratio_threshold: volumeRatio,
     });
   };
 
-  const handleAddToPortfolio = async (stock: typeof filteredResults[0]) => {
-    if (addingToPortfolio) return; // Prevent duplicate clicks
-    
-    setAddingToPortfolio(stock.id);
-    try {
-      const response = await portfolioApi.addPosition({
-        code: stock.code,
-        name: stock.name,
-        cost: stock.price,
-        shares: 100, // Default value, consistent with config
-        stop_loss_price: stock.price * 0.9, // Default value, consistent with config
-      });
-
-      if (response.success && response.data) {
-        showToast(`已添加 ${stock.name} 到持仓组合`, 'success');
-      } else {
-        showToast(response.error || response.message || '添加持仓失败', 'error');
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : '添加持仓失败';
-      showToast(errorMessage, 'error');
-    } finally {
-      setAddingToPortfolio(null);
-    }
+  const handleQuickBuy = (stock: typeof results[0]) => {
+    setQuickBuyStock({
+      code: stock.code,
+      name: stock.name,
+      price: stock.price,
+    });
   };
 
   // Results are managed by the store, updated by the hook
@@ -105,7 +92,7 @@ const Hunter: FC = () => {
               disabled={isLoading}
               className="bg-gray-900 hover:bg-black text-white font-semibold rounded-lg px-6 py-2.5 transition-all disabled:opacity-50"
             >
-              {isLoading ? '扫描中...' : '执行扫描'}
+              {isLoading ? '扫描中... (Scanning...)' : '⚡ 开始扫描 (Scan)'}
             </button>
             <button 
               type="button"
@@ -113,18 +100,39 @@ const Hunter: FC = () => {
               className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-900 transition-colors"
             >
               <SlidersHorizontal size={16} />
-              {isFiltersOpen ? '收起筛选' : '展开筛选'}
+              {isFiltersOpen ? '收起筛选 (Collapse Filters)' : '展开筛选 (Expand Filters)'}
             </button>
           </div>
         </div>
 
         {/* Collapsible Filters */}
         <div className={`transition-all duration-300 overflow-hidden ${isFiltersOpen ? 'max-h-96 md:max-h-48 opacity-100' : 'max-h-0 opacity-0'}`}>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-8 bg-gray-50 p-6 rounded-xl">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 md:gap-8 bg-gray-50 p-6 rounded-xl">
+             {/* Trade Date Selector */}
+             <div>
+               <label htmlFor="trade-date" className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
+                 扫描日期 (Scan Date)
+               </label>
+               <select
+                 id="trade-date"
+                 value={tradeDate || ''}
+                 onChange={(e) => setTradeDate(e.target.value || null)}
+                 className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+               >
+                 {filters?.available_dates?.map((date) => (
+                   <option key={date.value} value={date.value}>
+                     {date.label}
+                   </option>
+                 )) || (
+                   <option value="">加载中...</option>
+                 )}
+               </select>
+             </div>
+
              {/* RPS Slider */}
              <div>
                <div className="flex justify-between mb-2">
-                 <label htmlFor="rps-threshold" className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Min RPS Score</label>
+                 <label htmlFor="rps-threshold" className="text-xs font-semibold text-gray-500 uppercase tracking-wide">最小RPS分数 (Min RPS Score)</label>
                  <span className="text-xs font-bold text-ashare-red">{rpsThreshold}</span>
                </div>
                <input 
@@ -134,14 +142,14 @@ const Hunter: FC = () => {
                  max="100" 
                  value={rpsThreshold} 
                  onChange={(e) => setRpsThreshold(parseInt(e.target.value))}
-                 className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-black"
+                 className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
                />
              </div>
 
              {/* Volume Ratio Slider */}
              <div>
                <div className="flex justify-between mb-2">
-                 <label htmlFor="volume-ratio" className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Min Volume Ratio</label>
+                 <label htmlFor="volume-ratio" className="text-xs font-semibold text-gray-500 uppercase tracking-wide">最小量比 (Min Volume Ratio)</label>
                  <span className="text-xs font-bold text-blue-600">{volumeRatio}x</span>
                </div>
                <input 
@@ -152,7 +160,7 @@ const Hunter: FC = () => {
                  step="0.1"
                  value={volumeRatio} 
                  onChange={(e) => setVolumeRatio(parseFloat(e.target.value))}
-                 className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-black"
+                 className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
                />
              </div>
           </div>
@@ -170,21 +178,23 @@ const Hunter: FC = () => {
             <table className="w-full text-left border-collapse min-w-[800px]">
               <thead>
                 <tr className="border-b border-gray-100">
-                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider w-32">代码/名称</th>
-                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider w-24 text-right">价格</th>
-                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider w-24 text-right">涨跌幅</th>
-                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider w-48">RPS强度</th>
-                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider">AI分析</th>
-                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider w-16 text-center">操作</th>
+                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider w-32">代码/名称 (Code/Name)</th>
+                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider w-24 text-right">价格 (Price)</th>
+                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider w-24 text-right">涨跌幅 (Change %)</th>
+                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider w-48">RPS强度 (RPS Strength)</th>
+                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider w-24 text-right">PE</th>
+                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider w-32">行业 (Industry)</th>
+                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider">原因 (Reason)</th>
+                  <th className="py-4 px-4 text-xs font-semibold text-gray-400 uppercase tracking-wider w-16 text-center">操作 (Actions)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {filteredResults.map((stock) => {
-                  const isUp = stock.change_percent > 0;
-                  const changeColor = isUp ? 'text-ashare-red' : 'text-ashare-green';
+                {filteredResults.map((stock, index) => {
+                  // StockSignal doesn't have change_percent, so we'll skip that column for now
+                  // or we can calculate it if we have previous price data
                   
                   return (
-                    <tr key={stock.id} className="hover:bg-gray-50 transition-colors group">
+                    <tr key={stock.code || index} className="hover:bg-gray-50 transition-colors group">
                       <td className="py-4 px-4">
                         <div className="font-bold text-gray-900">{stock.name}</div>
                         <div className="text-xs text-gray-400 font-mono">{stock.code}</div>
@@ -192,8 +202,8 @@ const Hunter: FC = () => {
                       <td className="py-4 px-4 text-right font-medium text-gray-900">
                         {stock.price.toFixed(2)}
                       </td>
-                      <td className={`py-4 px-4 text-right font-medium ${changeColor}`}>
-                        {isUp ? '+' : ''}{stock.change_percent.toFixed(2)}%
+                      <td className="py-4 px-4 text-right font-medium text-gray-500">
+                        -
                       </td>
                       <td className="py-4 px-4">
                         <div className="flex items-center gap-3">
@@ -206,19 +216,25 @@ const Hunter: FC = () => {
                            </div>
                         </div>
                       </td>
+                      <td className="py-4 px-4 text-right font-medium text-gray-900">
+                        {stock.pe !== undefined && stock.pe !== null ? stock.pe.toFixed(2) : '-'}
+                      </td>
+                      <td className="py-4 px-4">
+                        <div className="text-sm text-gray-600">
+                          {stock.industry || '-'}
+                        </div>
+                      </td>
                       <td className="py-4 px-4 max-w-md">
-                        <div className="text-sm text-gray-600 truncate max-w-[200px] md:max-w-md cursor-pointer hover:text-gray-900" title={stock.ai_analysis}>
-                          <span className="mr-2">✨</span>
-                          {stock.ai_analysis || '暂无分析'}
+                        <div className="text-sm text-gray-600 truncate max-w-[200px] md:max-w-md" title={stock.reason}>
+                          {stock.reason || '-'}
                         </div>
                       </td>
                       <td className="py-4 px-4 text-center">
                         <button 
                           type="button" 
-                          onClick={() => handleAddToPortfolio(stock)}
-                          disabled={addingToPortfolio === stock.id}
-                          className="p-2 rounded-full hover:bg-gray-200 text-gray-400 hover:text-black transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          title="添加到持仓组合"
+                          onClick={() => handleQuickBuy(stock)}
+                          className="p-2 rounded-full hover:bg-gray-200 text-gray-400 hover:text-black transition-colors"
+                          title="快速买入 (Quick Buy)"
                         >
                           <Plus size={18} />
                         </button>
@@ -234,13 +250,22 @@ const Hunter: FC = () => {
                 <Search size={48} className="mb-4 opacity-20" />
                 <p className="text-center">
                   {results.length === 0 
-                    ? '暂无符合条件的股票，请尝试调整筛选条件' 
-                    : `已找到 ${results.length} 只股票，但当前筛选条件过滤后无结果，请尝试降低RPS阈值`}
+                    ? '暂无符合条件的股票，请尝试调整筛选条件 (No stocks match criteria, please adjust filters)' 
+                    : `已找到 ${results.length} 只股票，但当前筛选条件过滤后无结果，请尝试降低RPS阈值 (Found ${results.length} stocks, but filtered out. Try lowering RPS threshold)`}
                 </p>
               </div>
             )}
           </div>
         </div>
+      )}
+
+      {/* Quick Buy Modal */}
+      {quickBuyStock && (
+        <QuickBuyModal
+          stock={quickBuyStock}
+          isOpen={!!quickBuyStock}
+          onClose={() => setQuickBuyStock(null)}
+        />
       )}
     </div>
   );

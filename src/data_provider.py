@@ -1,28 +1,20 @@
 """
-DataProvider - DAAS Alpha 数据封装
-Tushare：get_daily_basic, get_roe, get_daily_pct_chg；
-公告 get_notices 降级采用东方财富，不依赖 Tushare anns_d。
+DataProvider - DAAS Alpha 数据封装 (Facade Pattern)
+统一数据接口，协调 APIClient 和 CacheManager
 """
-
 import os
 import time
-import yaml
 from pathlib import Path
 from typing import List, Optional
 
 import pandas as pd
-import tushare as ts
 from dotenv import load_dotenv
 
-from .api.eastmoney_api import EastmoneyAPI
+from .api.clients import TushareClient, EastmoneyClient
+from .cache import CacheManager
+from .config_manager import ConfigManager
 from .logging_config import get_logger
-from .database import (
-    get_cached_constituents,
-    save_constituents,
-    get_latest_constituents_date,
-    get_cached_daily_history,
-    save_daily_history_batch,
-)
+from .exceptions import DataFetchError
 
 logger = get_logger(__name__)
 
@@ -30,31 +22,54 @@ load_dotenv()
 
 
 class DataProvider:
-    """Tushare 行情/财务 + 东方财富公告"""
+    """
+    Tushare 行情/财务 + 东方财富公告
+    Facade 模式：统一数据接口，协调 APIClient 和 CacheManager
+    """
 
-    def __init__(self) -> None:
-        token = os.getenv("TUSHARE_TOKEN")
-        if not token or not str(token).strip():
-            raise ValueError("TUSHARE_TOKEN 未设置，请在 .env 中配置")
-        ts.set_token(token)
-        self._pro = ts.pro_api()
-        self._em = EastmoneyAPI()
+    def __init__(
+        self,
+        tushare_client: Optional[TushareClient] = None,
+        eastmoney_client: Optional[EastmoneyClient] = None,
+        cache_manager: Optional[CacheManager] = None,
+        config: Optional[ConfigManager] = None
+    ) -> None:
+        """
+        初始化 DataProvider
+        
+        Args:
+            tushare_client: Tushare 客户端，如果为 None 则创建新实例
+            eastmoney_client: 东方财富客户端，如果为 None 则创建新实例
+            cache_manager: 缓存管理器，如果为 None 则创建新实例
+            config: 配置管理器，如果为 None 则创建新实例
+        """
+        # 初始化配置
+        if config is None:
+            self.config = ConfigManager()
+        else:
+            self.config = config
+        
+        # 初始化 API 客户端
+        if tushare_client is None:
+            self._tushare_client = TushareClient(config=self.config)
+        else:
+            self._tushare_client = tushare_client
+        
+        if eastmoney_client is None:
+            self._eastmoney_client = EastmoneyClient(config=self.config)
+        else:
+            self._eastmoney_client = eastmoney_client
+        
+        # 初始化缓存管理器
+        if cache_manager is None:
+            self._cache_manager = CacheManager(config=self.config)
+        else:
+            self._cache_manager = cache_manager
         
         # 加载配置
-        config_path = Path("config/settings.yaml")
-        self._index_filter_enabled = True
-        self._index_code = "000852.SH"
-        self._fallback_to_all = False
-        if config_path.exists():
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = yaml.safe_load(f) or {}
-                index_filter = config.get("index_filter", {})
-                self._index_filter_enabled = index_filter.get("enabled", True)
-                self._index_code = index_filter.get("index_code", "000852.SH")
-                self._fallback_to_all = index_filter.get("fallback_to_all", False)
-            except Exception as e:
-                logger.debug(f"加载配置失败: {e}，使用默认值")
+        self._index_filter_enabled = self.config.get("index_filter.enabled", True)
+        self._index_code = self.config.get("index_filter.index_code", "000852.SH")
+        self._fallback_to_all = self.config.get("index_filter.fallback_to_all", False)
         
         logger.info(f"DataProvider 初始化完成（Tushare + 东方财富公告，指数过滤: {'启用' if self._index_filter_enabled else '禁用'}）")
 
@@ -91,13 +106,13 @@ class DataProvider:
                 logger.info(f"get_daily_basic: 使用成分股过滤，数量: {len(constituents)}")
                 use_constituents_filter = True
             
-            # 获取基础数据
-            basic = self._pro.stock_basic(
+            # 获取基础数据（使用 TushareClient）
+            basic = self._tushare_client.get_stock_basic(
                 exchange="",
                 list_status="L",
                 fields="ts_code,name,list_date",
             )
-            daily = self._pro.daily_basic(
+            daily = self._tushare_client.get_daily_basic(
                 trade_date=trade_date,
                 fields="ts_code,trade_date,pe,pb,total_mv,dv_ttm",
             )
@@ -132,12 +147,11 @@ class DataProvider:
         返回所有上市股票的基本信息。
         """
         try:
-            basic = self._pro.stock_basic(
+            return self._tushare_client.get_stock_basic(
                 exchange="",
                 list_status="L",
                 fields="ts_code,name,list_date",
             )
-            return basic
         except Exception as e:
             logger.error(f"get_stock_basic 失败: {e}")
             return pd.DataFrame()
@@ -192,7 +206,7 @@ class DataProvider:
             start_dt = end_dt - timedelta(days=days + 10)  # 多取几天以确保有足够交易日
             start_date = start_dt.strftime("%Y%m%d")
             
-            df = self._pro.daily(
+            df = self._tushare_client.get_daily(
                 ts_code=ts_code,
                 start_date=start_date,
                 end_date=end_date,
@@ -262,80 +276,9 @@ class DataProvider:
         end_dt = datetime.strptime(trade_date, "%Y%m%d")
         start_dt = end_dt - timedelta(days=365)
         
-        def get_roe_single(code: str, max_retries: int = 3) -> dict:
-            """获取单个股票的ROE，带重试机制"""
-            for attempt in range(max_retries):
-                try:
-                    df = self._pro.fina_indicator(
-                        ts_code=code,
-                        fields="ts_code,end_date,roe",
-                    )
-                    if df.empty or "end_date" not in df.columns:
-                        return None
-                    df["end_date"] = pd.to_datetime(df["end_date"], format="%Y%m%d", errors="coerce")
-                    df = df[(df["end_date"] >= start_dt) & (df["end_date"] <= end_dt)]
-                    if df.empty:
-                        return None
-                    last = df.sort_values("end_date").iloc[-1]
-                    return {"ts_code": code, "roe": float(last["roe"])}
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        logger.debug(f"get_roe {code} 失败 (尝试 {attempt + 1}/{max_retries}): {e}，重试中...")
-                        try:
-                            from .config_manager import ConfigManager
-                            config = ConfigManager()
-                            retry_delay = config.get('api_rate_limit.retry_delay', 0.5)
-                        except Exception:
-                            retry_delay = 0.5
-                        time.sleep(retry_delay * (attempt + 1))  # 递增延迟
-                    else:
-                        logger.debug(f"get_roe {code} 失败 (已重试 {max_retries} 次): {e}")
-                        return None
-            return None
-        
-        # 并发获取ROE（从配置读取并发数）
-        out: List[dict] = []
-        # 尝试从配置读取，如果没有配置则使用默认值
-        try:
-            from .config_manager import ConfigManager
-            config = ConfigManager()
-            max_workers = config.get('concurrency.roe_workers', 10)
-        except Exception:
-            max_workers = 10
-        
-        logger.info(f"开始并发获取ROE，共 {len(ts_codes)} 只股票，并发数: {max_workers}")
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # 提交所有任务
-            future_to_code = {
-                executor.submit(get_roe_single, code): code
-                for code in ts_codes
-            }
-            
-            # 使用tqdm显示进度
-            with tqdm(total=len(ts_codes), desc="ROE获取进度", unit="只", ncols=80) as pbar:
-                for future in as_completed(future_to_code):
-                    code = future_to_code[future]
-                    try:
-                        result = future.result()
-                        if result:
-                            out.append(result)
-                    except Exception as e:
-                        logger.debug(f"get_roe {code} 任务异常: {e}")
-                    finally:
-                        pbar.update(1)
-                        # 每个任务完成后短暂延迟（从配置读取）
-                        try:
-                            from .config_manager import ConfigManager
-                            config = ConfigManager()
-                            task_delay = config.get('api_rate_limit.task_delay', 0.02)
-                        except Exception:
-                            task_delay = 0.02
-                        time.sleep(task_delay)
-        
-        if not out:
-            return pd.DataFrame(columns=["ts_code", "roe"])
-        logger.info(f"ROE获取完成，成功获取 {len(out)} 只股票的ROE数据")
-        return pd.DataFrame(out)
+        # 使用 TushareClient 的批量获取方法
+        max_workers = self.config.get('concurrency.roe_workers', 10)
+        return self._tushare_client.get_roe_batch(ts_codes, trade_date, max_workers=max_workers)
 
     def get_daily_pct_chg(self, trade_date: str, ts_codes: List[str]) -> pd.DataFrame:
         """
@@ -343,7 +286,7 @@ class DataProvider:
         返回 ts_code, pct_chg。
         """
         try:
-            df = self._pro.daily(trade_date=trade_date, fields="ts_code,pct_chg")
+            df = self._tushare_client.get_daily(trade_date=trade_date, fields="ts_code,pct_chg")
             if df.empty:
                 return pd.DataFrame(columns=["ts_code", "pct_chg"])
             codes_set = set(ts_codes)
@@ -376,7 +319,7 @@ class DataProvider:
             else:
                 start_date = datetime.now().strftime("%Y%m%d")
         try:
-            return self._em.get_notices(stock_list=ts_codes, start_date=start_date)
+            return self._eastmoney_client.get_notices(stock_list=ts_codes, start_date=start_date)
         except Exception as e:
             logger.error(f"get_notices 失败: {e}")
             return pd.DataFrame(columns=["ts_code", "ann_date", "title", "title_ch", "art_code", "column_names"])
@@ -396,8 +339,8 @@ class DataProvider:
         import calendar
         
         try:
-            # 1. 先尝试从缓存获取
-            cached = get_cached_constituents(index_code, trade_date)
+            # 1. 先尝试从缓存获取（使用 CacheManager）
+            cached = self._cache_manager.get_constituents(index_code, trade_date)
             if cached:
                 logger.info(f"从缓存获取成分股: {index_code}, 数量: {len(cached)}")
                 return cached
@@ -411,8 +354,8 @@ class DataProvider:
             last_day = calendar.monthrange(trade_dt.year, trade_dt.month)[1]
             month_end = trade_dt.replace(day=last_day).strftime("%Y%m%d")
             
-            # 调用Tushare API获取成分股
-            df = self._pro.index_weight(
+            # 调用Tushare API获取成分股（使用 TushareClient）
+            df = self._tushare_client.get_index_weight(
                 index_code=index_code,
                 start_date=month_start,
                 end_date=month_end,
@@ -424,7 +367,7 @@ class DataProvider:
                 # 尝试获取最近一个月的数据
                 prev_month_end = (trade_dt.replace(day=1) - timedelta(days=1))
                 prev_month_start = prev_month_end.replace(day=1)
-                df = self._pro.index_weight(
+                df = self._tushare_client.get_index_weight(
                     index_code=index_code,
                     start_date=prev_month_start.strftime("%Y%m%d"),
                     end_date=prev_month_end.strftime("%Y%m%d"),
@@ -434,7 +377,7 @@ class DataProvider:
                     logger.warning(f"获取历史月份数据也失败: {index_code}")
                     return []
             
-            # 3. 处理数据并保存到缓存
+            # 3. 处理数据并保存到缓存（使用 CacheManager）
             # 取最新的trade_date对应的成分股
             if "trade_date" in df.columns:
                 df["trade_date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d", errors="coerce")
@@ -446,20 +389,23 @@ class DataProvider:
             
             # 构建保存数据
             constituents_data = []
+            weights_data = []
             for _, row in df_latest.iterrows():
-                constituents_data.append({
-                    "ts_code": str(row.get("con_code", "")),
-                    "weight": float(row.get("weight", 0)) if pd.notna(row.get("weight")) else None
-                })
+                constituents_data.append(str(row.get("con_code", "")))
+                weight = row.get("weight")
+                weights_data.append(float(weight) if pd.notna(weight) else None)
             
-            # 保存到缓存
+            # 保存到缓存（使用 CacheManager）
             latest_date_str = latest_date.strftime("%Y%m%d") if isinstance(latest_date, datetime) else str(latest_date).replace("-", "")
-            save_constituents(index_code, latest_date_str, constituents_data)
+            self._cache_manager.set_constituents(
+                index_code,
+                latest_date_str,
+                constituents_data,
+                weights=weights_data if any(w is not None for w in weights_data) else None
+            )
             
-            # 返回股票代码列表
-            ts_codes = [item["ts_code"] for item in constituents_data]
-            logger.info(f"从Tushare获取并缓存成分股: {index_code}, 日期: {latest_date_str}, 数量: {len(ts_codes)}")
-            return ts_codes
+            logger.info(f"从Tushare获取并缓存成分股: {index_code}, 日期: {latest_date_str}, 数量: {len(constituents_data)}")
+            return constituents_data
             
         except Exception as e:
             error_msg = str(e)
@@ -527,10 +473,10 @@ class DataProvider:
             logger.error("无法获取股票列表")
             return pd.DataFrame()
         
-        # 优先从数据库缓存读取
+        # 优先从数据库缓存读取（使用 CacheManager）
         if use_cache:
-            cached_df = get_cached_daily_history(stock_list, start_date, trade_date)
-            if not cached_df.empty:
+            cached_df = self._cache_manager.get_daily_history(stock_list, start_date, trade_date)
+            if cached_df is not None and not cached_df.empty:
                 # 检查缓存覆盖率
                 cached_stocks = set(cached_df['ts_code'].unique())
                 required_stocks = set(stock_list)
@@ -555,14 +501,14 @@ class DataProvider:
                     # 继续获取缺失股票的数据
                     stock_list = list(missing_stocks)
         
-        # 从API获取数据（缺失的股票或缓存未命中）
+        # 从API获取数据（缺失的股票或缓存未命中，使用 TushareClient）
         logger.info(f"从API获取历史数据: {len(stock_list)} 只股票 ({start_date} 到 {trade_date})")
         all_data = []
         
         from tqdm import tqdm
         for ts_code in tqdm(stock_list, desc="获取历史数据", ncols=80):
             try:
-                daily_df = self._pro.daily(
+                daily_df = self._tushare_client.get_daily(
                     ts_code=ts_code,
                     start_date=start_date,
                     end_date=trade_date,
@@ -571,15 +517,6 @@ class DataProvider:
                 
                 if not daily_df.empty:
                     all_data.append(daily_df)
-                
-                # API限流（从配置读取延迟）
-                try:
-                    from .config_manager import ConfigManager
-                    config = ConfigManager()
-                    api_delay = config.get('api_rate_limit.tushare_delay', 0.1)
-                except Exception:
-                    api_delay = 0.1
-                time.sleep(api_delay)
                 
             except Exception as e:
                 logger.debug(f"获取 {ts_code} 数据失败: {e}")
@@ -599,14 +536,16 @@ class DataProvider:
         # 合并缓存数据和API数据
         if use_cache and 'cached_df' in locals() and not cached_df.empty:
             result_df = pd.concat([cached_df, api_df], ignore_index=True)
-            result_df = result_df.drop_duplicates(subset=['ts_code', 'trade_date'], keep='last')
+            # 先排序确保稳定性，然后去重（统一使用keep='first'）
+            result_df = result_df.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+            result_df = result_df.drop_duplicates(subset=['ts_code', 'trade_date'], keep='first')
         else:
             result_df = api_df
         
-        # 保存到数据库缓存
+        # 保存到数据库缓存（使用 CacheManager）
         if use_cache and not result_df.empty:
             try:
-                save_daily_history_batch(result_df)
+                self._cache_manager.set_daily_history(result_df)
             except Exception as e:
                 logger.warning(f"保存到数据库缓存失败: {e}")
         
@@ -642,7 +581,7 @@ class DataProvider:
         from datetime import datetime
         import os
         
-        # 优先从数据库缓存读取
+        # 优先从数据库缓存读取（使用 CacheManager）
         if use_cache:
             # 先获取股票列表（用于查询缓存）
             if index_code:
@@ -661,38 +600,190 @@ class DataProvider:
                 stock_list_for_cache = basic['ts_code'].tolist() if not basic.empty else []
             
             if stock_list_for_cache:
-                cached_df = get_cached_daily_history(stock_list_for_cache, start_date, end_date)
-                if not cached_df.empty:
+                cached_df = self._cache_manager.get_daily_history(stock_list_for_cache, start_date, end_date)
+                if cached_df is not None and not cached_df.empty:
                     # 检查缓存覆盖率
                     cached_stocks = set(cached_df['ts_code'].unique())
                     required_stocks = set(stock_list_for_cache)
                     missing_stocks = required_stocks - cached_stocks
                     
-                    # 检查日期范围
+                    # 检查日期范围和数据完整性
+                    date_covered = False
+                    date_completeness = 0.0
                     if 'trade_date' in cached_df.columns:
-                        cached_df['trade_date'] = pd.to_datetime(cached_df['trade_date'], format='%Y%m%d', errors='coerce')
-                        cache_start = cached_df['trade_date'].min()
-                        cache_end = cached_df['trade_date'].max()
-                        req_start = datetime.strptime(start_date, '%Y%m%d')
-                        req_end = datetime.strptime(end_date, '%Y%m%d')
+                        # 确保trade_date是字符串格式（用于比较和过滤）
+                        if pd.api.types.is_datetime64_any_dtype(cached_df['trade_date']):
+                            cached_df['trade_date_str'] = cached_df['trade_date'].dt.strftime('%Y%m%d')
+                        elif cached_df['trade_date'].dtype == 'object':
+                            cached_df['trade_date_str'] = cached_df['trade_date'].astype(str)
+                        else:
+                            cached_df['trade_date_str'] = cached_df['trade_date'].astype(str)
                         
-                        date_covered = cache_start <= req_start and cache_end >= req_end
-                    else:
-                        date_covered = False
+                        # 检查日期范围覆盖
+                        req_start = pd.to_datetime(start_date, format='%Y%m%d')
+                        req_end = pd.to_datetime(end_date, format='%Y%m%d')
+                        
+                        # 将trade_date_str转换为datetime用于范围检查
+                        cached_df['trade_date_dt'] = pd.to_datetime(cached_df['trade_date_str'], format='%Y%m%d', errors='coerce')
+                        valid_dates = cached_df['trade_date_dt'].dropna()
+                        
+                        if not valid_dates.empty:
+                            cache_start = valid_dates.min()
+                            cache_end = valid_dates.max()
+                            
+                            # 检查日期范围覆盖
+                            # 注意：get_cached_daily_history已经按日期范围过滤（start_date 到 end_date）
+                            # 所以返回的数据应该都在请求范围内，但可能缺少某些交易日的数据
+                            # 关键：如果cache_start > req_start 或 cache_end < req_end，说明缺少开始或结束日期的数据
+                            # 这种情况下，不应该使用缓存，因为会影响回测准确性
+                            date_covered = cache_start <= req_start and cache_end >= req_end
+                            
+                            # 额外检查：即使日期范围覆盖，也要检查是否有足够的交易日数据
+                            # 如果缺少太多交易日，也不应该使用缓存
+                            if date_covered:
+                                # 估算应该有多少个交易日（粗略估算）
+                                total_days = (req_end - req_start).days
+                                estimated_trading_days = int(total_days * 0.7)  # 假设70%是交易日
+                                actual_trading_days = unique_dates_count
+                                
+                                # 如果实际交易日数少于估算的80%，认为数据不完整
+                                if estimated_trading_days > 0 and actual_trading_days < estimated_trading_days * 0.8:
+                                    logger.warning(
+                                        f"⚠️ 缓存数据交易日数不足: 实际 {actual_trading_days} 个交易日, "
+                                        f"估算 {estimated_trading_days} 个交易日, 可能缺少部分交易日数据"
+                                    )
+                                    date_covered = False  # 标记为不覆盖，强制重新获取
+                            
+                            # 如果日期覆盖为False，说明缓存数据缺少某些日期的数据
+                            # 这种情况下，即使股票覆盖率100%，也不应该使用缓存，因为数据不完整
+                            if not date_covered:
+                                logger.warning(
+                                    f"⚠️ 缓存数据日期范围不完整: "
+                                    f"缓存范围[{cache_start.date()} 到 {cache_end.date()}] "
+                                    f"请求范围[{req_start.date()} 到 {req_end.date()}]，"
+                                    f"缺少部分日期数据，需要重新获取"
+                                )
+                            
+                            # 检查数据完整性：计算每个股票在每个交易日是否有数据
+                            # 注意：get_cached_daily_history已经按日期范围过滤，所以返回的数据应该在请求范围内
+                            # 但我们需要检查数据是否完整（是否有所有股票在所有交易日的数据）
+                            unique_dates = sorted(valid_dates.unique())
+                            unique_dates_count = len(unique_dates)
+                            
+                            # 计算每个股票的数据条数
+                            stock_date_counts = cached_df.groupby('ts_code')['trade_date_str'].nunique()
+                            avg_dates_per_stock = stock_date_counts.mean() if len(stock_date_counts) > 0 else 0
+                            
+                            # 数据完整性 = 平均每个股票的数据条数 / 交易日数
+                            # 如果完整性 > 0.90，认为数据足够完整（允许10%的缺失，比如停牌）
+                            date_completeness = avg_dates_per_stock / unique_dates_count if unique_dates_count > 0 else 0.0
+                            
+                            # 额外检查：是否有足够的股票有完整的数据
+                            # 至少90%的交易日有数据，认为该股票数据完整
+                            stocks_with_full_data = (stock_date_counts >= unique_dates_count * 0.90).sum()
+                            stock_completeness = stocks_with_full_data / len(required_stocks) if required_stocks else 0.0
+                            
+                            # 计算期望的记录数（考虑停牌等因素，期望值应该略小于理论值）
+                            # 理论值：len(required_stocks) * unique_dates_count
+                            # 实际值：len(cached_df)
+                            expected_records = len(required_stocks) * unique_dates_count
+                            actual_records = len(cached_df)
+                            record_completeness = actual_records / expected_records if expected_records > 0 else 0.0
+                            
+                            logger.info(
+                                f"缓存日期范围检查: 缓存[{cache_start.date()} 到 {cache_end.date()}] "
+                                f"请求[{req_start.date()} 到 {req_end.date()}], "
+                                f"覆盖: {date_covered}, 日期完整性: {date_completeness*100:.1f}%, "
+                                f"股票完整性: {stock_completeness*100:.1f}%, 记录完整性: {record_completeness*100:.1f}% "
+                                f"({actual_records}/{expected_records} 条记录, {unique_dates_count} 个交易日)"
+                            )
+                        else:
+                            logger.warning("缓存数据中没有有效的日期")
                     
-                    if not missing_stocks and date_covered:
-                        logger.info(f"从数据库缓存获取完整历史数据: {len(cached_df)} 条记录 ({start_date} 到 {end_date})")
+                    # 详细日志输出，帮助诊断问题
+                    stock_completeness = stock_completeness if 'stock_completeness' in locals() else 0.0
+                    record_completeness = record_completeness if 'record_completeness' in locals() else 0.0
+                    
+                    logger.info(
+                        f"缓存检查结果: 缓存股票数={len(cached_stocks)}, 需要股票数={len(required_stocks)}, "
+                        f"缺失股票数={len(missing_stocks)}, 日期覆盖={date_covered}, "
+                        f"日期完整性={date_completeness*100:.1f}%, 股票完整性={stock_completeness*100:.1f}%, "
+                        f"记录完整性={record_completeness*100:.1f}%"
+                    )
+                    
+                    # 检查缓存数据的实际日期范围
+                    cache_coverage_ratio = len(cached_stocks) / len(required_stocks) if required_stocks else 0
+                    
+                    # 关键修复：只有当数据完整性足够高时才使用缓存
+                    # 数据完整性阈值：至少85%（允许15%的缺失，比如停牌股票）
+                    min_completeness = 0.85
+                    min_stock_completeness = 0.85  # 至少85%的股票有完整数据
+                    min_record_completeness = 0.85  # 至少85%的记录存在
+                    
+                    # 计算综合完整性（加权平均，记录完整性权重最高）
+                    overall_completeness = (
+                        date_completeness * 0.3 + 
+                        stock_completeness * 0.3 + 
+                        record_completeness * 0.4
+                    )
+                    
+                    # 关键修复：只有当日期完全覆盖且数据完整性足够时才使用缓存
+                    # 如果日期覆盖为False，说明缓存数据缺少某些日期的数据，不应该使用缓存
+                    if not missing_stocks and date_covered and overall_completeness >= min_completeness:
+                        logger.info(
+                            f"✅ 从数据库缓存获取完整历史数据: {len(cached_df)} 条记录 "
+                            f"({start_date} 到 {end_date}), 数据完整性: {overall_completeness*100:.1f}%"
+                        )
+                        # 确保trade_date是字符串格式（用于后续处理）
+                        if 'trade_date_str' not in cached_df.columns:
+                            if pd.api.types.is_datetime64_any_dtype(cached_df['trade_date']):
+                                cached_df['trade_date_str'] = cached_df['trade_date'].dt.strftime('%Y%m%d')
+                            elif cached_df['trade_date'].dtype == 'object':
+                                cached_df['trade_date_str'] = cached_df['trade_date'].astype(str)
+                            else:
+                                cached_df['trade_date_str'] = cached_df['trade_date'].astype(str)
+                        
+                        # 过滤到请求的日期范围（确保数据在请求范围内）
+                        # 注意：get_cached_daily_history已经过滤了，但为了安全起见，再次过滤
+                        mask = (cached_df['trade_date_str'] >= start_date) & (cached_df['trade_date_str'] <= end_date)
+                        cached_df = cached_df[mask].drop(columns=['trade_date_str', 'trade_date_dt'], errors='ignore')
+                        
                         # 如果指定了指数，过滤成分股
                         if index_code and constituents:
                             cached_df = cached_df[cached_df['ts_code'].isin(constituents)]
+                        
+                        logger.info(f"✅ 缓存数据过滤后: {len(cached_df)} 条记录")
                         return cached_df
+                    elif not missing_stocks and date_covered and overall_completeness < min_completeness:
+                        logger.warning(
+                            f"⚠️ 缓存数据完整性不足 (综合完整性: {overall_completeness*100:.1f}% < {min_completeness*100:.0f}%)，"
+                            f"日期完整性: {date_completeness*100:.1f}%, 股票完整性: {stock_completeness*100:.1f}%，"
+                            f"可能缺少部分交易日数据，重新获取以确保准确性"
+                        )
+                        stock_list = stock_list_for_cache
+                        cached_df_partial = None
                     elif date_covered:
-                        logger.info(f"数据库缓存部分命中: {len(cached_stocks)}/{len(required_stocks)} 只股票，缺失 {len(missing_stocks)} 只")
+                        logger.info(f"⚠️ 数据库缓存部分命中: {len(cached_stocks)}/{len(required_stocks)} 只股票，缺失 {len(missing_stocks)} 只")
                         # 继续获取缺失股票的数据
                         stock_list = list(missing_stocks) if missing_stocks else None
                         cached_df_partial = cached_df.copy()
+                    # 关键修复：如果日期覆盖为False，说明缓存数据缺少某些日期的数据
+                    # 这种情况下，不应该使用缓存，因为会影响回测准确性
+                    elif not date_covered:
+                        logger.warning(
+                            f"❌ 缓存数据日期范围不完整，日期覆盖={date_covered}，"
+                            f"缓存范围可能缺少部分日期数据，重新获取以确保回测准确性"
+                        )
+                        stock_list = stock_list_for_cache
+                        cached_df_partial = None
                     else:
-                        logger.info(f"数据库缓存日期范围不足，需要补充数据")
+                        if missing_stocks:
+                            logger.warning(f"❌ 数据库缓存不完整: 缺失 {len(missing_stocks)} 只股票 (覆盖率: {cache_coverage_ratio*100:.1f}%)")
+                        if not date_covered:
+                            logger.warning(
+                                f"❌ 数据库缓存日期范围不足: "
+                                f"缓存范围可能不覆盖请求范围 [{start_date} 到 {end_date}]"
+                            )
                         stock_list = stock_list_for_cache
                         cached_df_partial = None
                 else:
@@ -705,37 +796,82 @@ class DataProvider:
             stock_list = None
             cached_df_partial = None
         
-        # 检查CSV缓存（向后兼容）
-        cache_path = Path("data/cache.csv")
-        if use_cache and cache_path.exists() and 'cached_df' not in locals():
-            try:
-                cached_df = pd.read_csv(cache_path, dtype={'trade_date': str})
-                cached_df['trade_date'] = pd.to_datetime(cached_df['trade_date'], format='%Y%m%d', errors='coerce')
-                
-                # 检查缓存是否覆盖所需日期范围
-                if not cached_df.empty and 'trade_date' in cached_df.columns:
-                    cache_start = cached_df['trade_date'].min()
-                    cache_end = cached_df['trade_date'].max()
-                    req_start = datetime.strptime(start_date, '%Y%m%d')
-                    req_end = datetime.strptime(end_date, '%Y%m%d')
-                    
-                    if cache_start <= req_start and cache_end >= req_end:
-                        # 过滤到所需日期范围
-                        mask = (cached_df['trade_date'] >= req_start) & (cached_df['trade_date'] <= req_end)
-                        filtered = cached_df[mask].copy()
-                        
-                        # 如果指定了指数，过滤成分股
-                        if index_code:
-                            constituents = self.get_index_constituents(end_date, index_code)
-                            if constituents:
-                                filtered = filtered[filtered['ts_code'].isin(constituents)]
-                        
-                        logger.info(f"从缓存加载数据: {len(filtered)} 条记录 ({start_date} 到 {end_date})")
-                        return filtered
-            except Exception as e:
-                logger.warning(f"读取缓存失败: {e}，将重新获取数据")
+        # CSV 缓存已移除，统一使用数据库缓存
         
-        # 获取股票列表（如果还没有从缓存逻辑中获取）
+        # 如果已经使用完整缓存且不需要API获取，检查是否需要PE数据
+        cache_fully_hit = False
+        if use_cache and 'cached_df_partial' in locals() and cached_df_partial is not None:
+            if stock_list is None:
+                # 缓存完全命中，不需要API获取历史数据
+                cache_fully_hit = True
+                logger.info(f"✅ 使用完整缓存数据，跳过API获取历史数据: {len(cached_df_partial)} 条记录")
+                result_df = cached_df_partial.copy()
+                
+                # 确保trade_date格式正确（字符串格式）
+                if 'trade_date' in result_df.columns:
+                    if pd.api.types.is_datetime64_any_dtype(result_df['trade_date']):
+                        result_df['trade_date'] = result_df['trade_date'].dt.strftime('%Y%m%d')
+                    elif result_df['trade_date'].dtype == 'object':
+                        # 已经是字符串格式，确保格式正确
+                        pass
+                
+                # 检查是否需要获取PE数据
+                if 'pe_ttm' not in result_df.columns or result_df['pe_ttm'].isna().all():
+                    logger.info("缓存数据缺少PE数据，获取PE数据...")
+                    # 继续执行PE数据获取逻辑（见下方代码）
+                else:
+                    # 已经有PE数据，直接返回
+                    logger.info(f"✅ 缓存数据完整（包含PE数据），直接返回: {len(result_df)} 条记录")
+                    return result_df
+        
+        # 如果缓存完全命中，跳过股票列表获取和API数据获取
+        if cache_fully_hit:
+            # 只获取PE数据（如果需要）
+            # 获取所有交易日（确保trade_date是字符串格式）
+            if 'trade_date' in result_df.columns:
+                if pd.api.types.is_datetime64_any_dtype(result_df['trade_date']):
+                    trade_dates = sorted(result_df['trade_date'].dt.strftime('%Y%m%d').unique())
+                else:
+                    trade_dates = sorted(result_df['trade_date'].astype(str).unique())
+            else:
+                trade_dates = []
+            
+            # 获取PE数据
+            pe_data_list = []
+            from tqdm import tqdm
+            for trade_date in tqdm(trade_dates, desc="获取PE数据", ncols=80):
+                try:
+                    daily_basic = self._tushare_client.get_daily_basic(
+                        trade_date=trade_date,
+                        fields="ts_code,trade_date,pe"
+                    )
+                    if not daily_basic.empty:
+                        daily_basic = daily_basic.rename(columns={'pe': 'pe_ttm'})
+                        pe_data_list.append(daily_basic)
+                except Exception as e:
+                    logger.debug(f"获取 {trade_date} 的PE数据失败: {e}")
+                    continue
+            
+            # 合并PE数据
+            if pe_data_list:
+                pe_df = pd.concat(pe_data_list, ignore_index=True)
+                result_df = result_df.merge(
+                    pe_df[['ts_code', 'trade_date', 'pe_ttm']],
+                    on=['ts_code', 'trade_date'],
+                    how='left'
+                )
+            else:
+                result_df['pe_ttm'] = None
+            
+            # 确保trade_date格式一致（字符串格式）
+            if 'trade_date' in result_df.columns:
+                if pd.api.types.is_datetime64_any_dtype(result_df['trade_date']):
+                    result_df['trade_date'] = result_df['trade_date'].dt.strftime('%Y%m%d')
+            
+            logger.info(f"✅ 缓存数据（已补充PE数据）: {len(result_df)} 条记录")
+            return result_df
+        
+        # 获取股票列表（如果还没有从缓存逻辑中获取，且需要API获取）
         if 'stock_list' not in locals() or stock_list is None:
             if index_code:
                 logger.info(f"获取指数成分股: {index_code}")
@@ -756,8 +892,12 @@ class DataProvider:
                 stock_list = basic['ts_code'].tolist() if not basic.empty else []
                 logger.info(f"全市场股票数量: {len(stock_list)}")
         
+        # 如果stock_list为空且没有缓存数据，返回空DataFrame
         if not stock_list:
-            logger.error("无法获取股票列表")
+            if use_cache and 'cached_df_partial' in locals() and cached_df_partial is not None:
+                logger.info("股票列表为空，但存在缓存数据，使用缓存数据")
+                return cached_df_partial
+            logger.error("无法获取股票列表且无缓存数据")
             return pd.DataFrame()
         
         # 分批获取数据（避免API限制）
@@ -771,10 +911,10 @@ class DataProvider:
         for i in tqdm(range(0, len(stock_list), batch_size), desc="获取历史数据", ncols=80):
             batch_codes = stock_list[i:i + batch_size]
             
-            # 逐个获取股票数据（Tushare API限制）
+            # 逐个获取股票数据（使用 TushareClient，自动处理限流）
             for ts_code in batch_codes:
                 try:
-                    daily_df = self._pro.daily(
+                    daily_df = self._tushare_client.get_daily(
                         ts_code=ts_code,
                         start_date=start_date,
                         end_date=end_date,
@@ -784,24 +924,10 @@ class DataProvider:
                     if not daily_df.empty:
                         all_data.append(daily_df)
                     
-                    # API限流（从配置读取延迟）
-                    try:
-                        from .config_manager import ConfigManager
-                        config = ConfigManager()
-                        api_delay = config.get('api_rate_limit.tushare_delay', 0.1)
-                    except Exception:
-                        api_delay = 0.1
-                    time.sleep(api_delay)
-                    
                 except Exception as e:
                     logger.debug(f"获取 {ts_code} 数据失败: {e}")
                     continue
         
-        if not all_data:
-            logger.warning("未获取到任何数据")
-            return pd.DataFrame()
-        
-        # 合并所有数据
         if not all_data:
             # 如果API获取失败，返回缓存数据（如果有）
             if use_cache and 'cached_df_partial' in locals() and cached_df_partial is not None:
@@ -813,36 +939,49 @@ class DataProvider:
         api_df = pd.concat(all_data, ignore_index=True)
         
         # 合并缓存数据和API数据
-        if use_cache and 'cached_df_partial' in locals() and cached_df_partial is not None:
-            result_df = pd.concat([cached_df_partial, api_df], ignore_index=True)
-            result_df = result_df.drop_duplicates(subset=['ts_code', 'trade_date'], keep='last')
+        if use_cache and 'cached_df_partial' in locals() and cached_df_partial is not None and not cached_df_partial.empty:
+            # 确保两个DataFrame的列一致
+            if not api_df.empty:
+                # 统一列名和格式
+                common_cols = set(cached_df_partial.columns) & set(api_df.columns)
+                cached_df_partial = cached_df_partial[list(common_cols)]
+                api_df = api_df[list(common_cols)]
+                
+                result_df = pd.concat([cached_df_partial, api_df], ignore_index=True)
+                # 先排序确保稳定性，然后去重（统一使用keep='first'）
+                result_df = result_df.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
+                result_df = result_df.drop_duplicates(subset=['ts_code', 'trade_date'], keep='first')
+                logger.info(f"合并缓存和API数据: 缓存 {len(cached_df_partial)} 条 + API {len(api_df)} 条 = {len(result_df)} 条（去重后）")
+            else:
+                # 如果API没有获取到新数据，直接使用缓存
+                result_df = cached_df_partial.copy()
+                logger.info(f"API未获取到新数据，使用缓存数据: {len(result_df)} 条")
         else:
             result_df = api_df
         
         # 获取每日基本面数据（pe_ttm）
-        logger.info("获取每日基本面数据（pe_ttm）...")
-        pe_data_list = []
-        
-        # 获取所有交易日
-        trade_dates = sorted(result_df['trade_date'].unique())
+        # 检查是否已经有PE数据（从缓存获取的完整数据可能已包含PE）
+        if 'pe_ttm' in result_df.columns and not result_df['pe_ttm'].isna().all():
+            logger.info(f"数据已包含PE信息，跳过PE数据获取: {result_df['pe_ttm'].notna().sum()}/{len(result_df)} 条有PE数据")
+        else:
+            logger.info("获取每日基本面数据（pe_ttm）...")
+            pe_data_list = []
+            
+            # 获取所有交易日（确保trade_date是字符串格式）
+            if pd.api.types.is_datetime64_any_dtype(result_df['trade_date']):
+                trade_dates = sorted(result_df['trade_date'].dt.strftime('%Y%m%d').unique())
+            else:
+                trade_dates = sorted(result_df['trade_date'].astype(str).unique())
         
         for trade_date in tqdm(trade_dates, desc="获取PE数据", ncols=80):
             try:
-                daily_basic = self._pro.daily_basic(
+                daily_basic = self._tushare_client.get_daily_basic(
                     trade_date=trade_date,
                     fields="ts_code,trade_date,pe"
                 )
                 if not daily_basic.empty:
                     daily_basic = daily_basic.rename(columns={'pe': 'pe_ttm'})
                     pe_data_list.append(daily_basic)
-                # API限流（从配置读取延迟）
-                try:
-                    from .config_manager import ConfigManager
-                    config = ConfigManager()
-                    api_delay = config.get('api_rate_limit.tushare_delay', 0.1)
-                except Exception:
-                    api_delay = 0.1
-                time.sleep(api_delay)
             except Exception as e:
                 logger.debug(f"获取 {trade_date} 的PE数据失败: {e}")
                 continue
@@ -864,52 +1003,21 @@ class DataProvider:
         # 排序
         result_df = result_df.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
         
-        # 保存到缓存
-        if use_cache:
-            # 优先保存到数据库缓存
+        # 保存到数据库缓存（使用 CacheManager，CSV 缓存已移除）
+        if use_cache and not result_df.empty:
             try:
                 # 准备数据（确保trade_date是字符串格式）
                 cache_df = result_df.copy()
                 if 'trade_date' in cache_df.columns:
                     if pd.api.types.is_datetime64_any_dtype(cache_df['trade_date']):
                         cache_df['trade_date'] = cache_df['trade_date'].dt.strftime('%Y%m%d')
+                    # 只保存历史数据列（移除 pe_ttm，因为它不在缓存表中）
+                    if 'pe_ttm' in cache_df.columns:
+                        cache_df = cache_df.drop(columns=['pe_ttm'])
                 
-                save_daily_history_batch(cache_df)
+                self._cache_manager.set_daily_history(cache_df)
             except Exception as e:
                 logger.warning(f"保存到数据库缓存失败: {e}")
-            
-            # 同时保存到CSV缓存（向后兼容）
-            try:
-                # 读取现有缓存（如果有）
-                if cache_path.exists():
-                    try:
-                        existing_cache = pd.read_csv(cache_path, dtype={'trade_date': str})
-                        existing_cache['trade_date'] = pd.to_datetime(existing_cache['trade_date'], format='%Y%m%d', errors='coerce')
-                        
-                        # 合并并去重
-                        combined = pd.concat([existing_cache, result_df], ignore_index=True)
-                        combined = combined.drop_duplicates(subset=['ts_code', 'trade_date'], keep='last')
-                        combined = combined.sort_values(['ts_code', 'trade_date']).reset_index(drop=True)
-                        
-                        # 保存
-                        if pd.api.types.is_datetime64_any_dtype(combined['trade_date']):
-                            combined['trade_date'] = combined['trade_date'].dt.strftime('%Y%m%d')
-                        combined.to_csv(cache_path, index=False)
-                        logger.info(f"更新CSV缓存: {len(combined)} 条记录")
-                    except Exception as e:
-                        logger.warning(f"合并CSV缓存失败: {e}，直接保存新数据")
-                        if pd.api.types.is_datetime64_any_dtype(result_df['trade_date']):
-                            result_df['trade_date'] = result_df['trade_date'].dt.strftime('%Y%m%d')
-                        result_df.to_csv(cache_path, index=False)
-                else:
-                    # 创建目录（如果不存在）
-                    cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    if pd.api.types.is_datetime64_any_dtype(result_df['trade_date']):
-                        result_df['trade_date'] = result_df['trade_date'].dt.strftime('%Y%m%d')
-                    result_df.to_csv(cache_path, index=False)
-                    logger.info(f"保存CSV缓存: {len(result_df)} 条记录")
-            except Exception as e:
-                logger.warning(f"保存CSV缓存失败: {e}")
         
         # 转换trade_date回字符串格式（保持一致性）
         # 检查trade_date的类型，只有在datetime类型时才使用.dt访问器
