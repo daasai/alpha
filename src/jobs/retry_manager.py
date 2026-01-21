@@ -11,6 +11,7 @@ from typing import List, Optional, Dict, Any
 
 from src.database import (
     get_latest_daily_task_execution,
+    get_daily_task_execution_by_id,
     update_daily_task_execution_status,
     list_daily_task_executions
 )
@@ -52,15 +53,20 @@ class RetryManager:
         
         Args:
             execution_id: 执行ID
-            trade_date: 交易日期（可选）
+            trade_date: 交易日期（可选，用于验证）
         
         Returns:
             如果应该重试返回True，否则返回False
         """
-        execution = get_latest_daily_task_execution(trade_date=trade_date)
+        execution = get_daily_task_execution_by_id(execution_id)
         
-        if not execution or execution.get('execution_id') != execution_id:
+        if not execution:
             logger.warning(f"未找到执行记录: {execution_id}")
+            return False
+        
+        # 验证trade_date是否匹配（如果提供了trade_date）
+        if trade_date and execution.get('trade_date') != trade_date:
+            logger.warning(f"执行记录trade_date不匹配: {execution_id}")
             return False
         
         status = execution.get('status')
@@ -98,7 +104,7 @@ class RetryManager:
         if not self.should_retry(execution_id, trade_date):
             return None
         
-        execution = get_latest_daily_task_execution(trade_date=trade_date)
+        execution = get_daily_task_execution_by_id(execution_id)
         if not execution:
             return None
         
@@ -138,17 +144,23 @@ class RetryManager:
         Returns:
             新的重试计数
         """
-        execution = get_latest_daily_task_execution()
-        if not execution or execution.get('execution_id') != execution_id:
+        execution = get_daily_task_execution_by_id(execution_id)
+        if not execution:
             logger.warning(f"未找到执行记录: {execution_id}")
             return 0
         
-        # 注意：这里我们需要通过数据库更新retry_count
-        # 由于update_daily_task_execution_status不直接支持retry_count更新
-        # 我们需要在TaskExecutor中处理retry_count的更新
-        # 这里只返回当前计数+1
         current_count = execution.get('retry_count', 0)
-        return current_count + 1
+        new_count = current_count + 1
+        
+        # 更新数据库中的retry_count
+        update_daily_task_execution_status(
+            execution_id=execution_id,
+            status=execution.get('status', 'FAILED'),  # 保持当前状态
+            retry_count=new_count
+        )
+        
+        logger.debug(f"增加重试计数: execution_id={execution_id}, retry_count={new_count}")
+        return new_count
     
     def get_pending_retries(self) -> List[Dict[str, Any]]:
         """
@@ -189,8 +201,8 @@ class RetryManager:
         Returns:
             如果成功取消返回True
         """
-        execution = get_latest_daily_task_execution()
-        if not execution or execution.get('execution_id') != execution_id:
+        execution = get_daily_task_execution_by_id(execution_id)
+        if not execution:
             return False
         
         if execution.get('status') == 'RETRYING':

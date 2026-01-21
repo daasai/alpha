@@ -13,7 +13,8 @@ from src.jobs.retry_manager import RetryManager
 from src.database import (
     get_daily_task_execution_by_id,
     list_daily_task_executions,
-    get_latest_daily_task_execution
+    get_latest_daily_task_execution,
+    get_running_daily_task_execution
 )
 from src.logging_config import get_logger
 
@@ -99,6 +100,74 @@ def _execute_task_async(
         logger.exception(f"异步任务执行异常: {e}")
 
 
+def _execute_retry_task_async(
+    task_executor: TaskExecutor,
+    execution_id: str,
+    trade_date: str
+) -> None:
+    """异步执行重试任务"""
+    try:
+        from src.database import update_daily_task_execution_status
+        
+        start_time = datetime.now()
+        
+        # 执行任务（直接调用daily_runner，不创建新的执行记录）
+        result = task_executor.daily_runner.run(
+            trade_date=trade_date,
+            execution_id=execution_id
+        )
+        
+        # 计算执行时长
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        
+        # 更新执行记录状态
+        if result.get('success'):
+            update_daily_task_execution_status(
+                execution_id=execution_id,
+                status='SUCCESS',
+                steps_completed=result.get('steps_completed', []),
+                duration_seconds=duration
+            )
+            logger.info(
+                f"手动重试任务执行成功: execution_id={execution_id}, "
+                f"duration={duration:.2f}秒"
+            )
+        else:
+            # 执行失败，检查是否需要安排下次重试
+            from src.jobs.retry_manager import RetryManager
+            retry_manager = RetryManager()
+            
+            if retry_manager.should_retry(execution_id, trade_date):
+                # 安排下次重试
+                next_retry_at = retry_manager.schedule_retry(execution_id, trade_date)
+                logger.info(
+                    f"手动重试任务执行失败，已安排下次重试: execution_id={execution_id}, "
+                    f"next_retry_at={next_retry_at}"
+                )
+            else:
+                # 已达到最大重试次数，标记为最终失败
+                update_daily_task_execution_status(
+                    execution_id=execution_id,
+                    status='FAILED',
+                    errors=result.get('errors', []),
+                    steps_completed=result.get('steps_completed', []),
+                    duration_seconds=duration
+                )
+                logger.warning(
+                    f"手动重试任务执行失败且已达到最大重试次数: execution_id={execution_id}"
+                )
+    except Exception as e:
+        logger.exception(f"执行重试任务异常: {e}")
+        # 更新状态为FAILED
+        from src.database import update_daily_task_execution_status
+        update_daily_task_execution_status(
+            execution_id=execution_id,
+            status='FAILED',
+            errors=[f"执行异常: {str(e)}"]
+        )
+
+
 @router.post("/daily-runner/trigger", response_model=TriggerResponse)
 async def trigger_daily_runner(
     request: TriggerRequest,
@@ -126,18 +195,31 @@ async def trigger_daily_runner(
         if not request.force:
             latest_execution = get_latest_daily_task_execution(trade_date=trade_date)
             if latest_execution and latest_execution.get('status') == 'SUCCESS':
+                # 优化错误信息，使其更友好
+                execution_time = latest_execution.get('started_at')
+                if execution_time:
+                    try:
+                        exec_dt = datetime.fromisoformat(execution_time.replace('Z', '+00:00'))
+                        exec_time_str = exec_dt.strftime('%Y-%m-%d %H:%M:%S')
+                    except:
+                        exec_time_str = execution_time
+                else:
+                    exec_time_str = '未知时间'
+                
                 raise HTTPException(
                     status_code=400,
                     detail={
-                        "message": f"交易日期 {trade_date} 已有成功执行记录",
+                        "error": "DUPLICATE_EXECUTION",
+                        "message": f"交易日期 {trade_date} 已有成功执行记录（执行时间：{exec_time_str}）",
                         "execution_id": latest_execution.get('execution_id'),
-                        "hint": "如需重新执行，请设置 force=true"
+                        "hint": "如需重新执行，请点击\"强制执行\"按钮或设置 force=true",
+                        "user_friendly": True
                     }
                 )
         
         # 并发控制检查
-        running_execution = get_latest_daily_task_execution()
-        if running_execution and running_execution.get('status') == 'RUNNING':
+        running_execution = get_running_daily_task_execution()
+        if running_execution:
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -147,25 +229,11 @@ async def trigger_daily_runner(
                 }
             )
         
-        # 创建执行记录（在后台任务中执行）
-        # 先创建执行记录，然后异步执行
-        execution_id = task_executor.execute(
-            trade_date=trade_date,
-            trigger_type='API',
-            force=request.force
-        ).get('execution_id')
+        # 在后台异步执行任务（task_executor.execute内部会创建执行记录和执行任务）
+        # 由于无法立即获取execution_id，使用临时ID返回
+        import uuid
+        execution_id = str(uuid.uuid4())
         
-        # 如果执行被阻止（如重复执行），返回相应信息
-        execution = get_daily_task_execution_by_id(execution_id)
-        if execution and execution.get('status') in ['DUPLICATE', 'BLOCKED']:
-            return TriggerResponse(
-                success=False,
-                execution_id=execution_id,
-                message=execution.get('errors', ['执行被阻止'])[0] if execution.get('errors') else '执行被阻止',
-                trade_date=trade_date
-            )
-        
-        # 在后台异步执行任务
         background_tasks.add_task(
             _execute_task_async,
             task_executor,
@@ -360,36 +428,40 @@ async def retry_execution(
         if not retry_manager.should_retry(execution_id, execution.get('trade_date')):
             raise HTTPException(
                 status_code=400,
-                detail="该任务不符合重试条件（可能已成功或已达到最大重试次数）"
+                detail={
+                    "error": "RETRY_NOT_ALLOWED",
+                    "message": "该任务不符合重试条件（可能已成功或已达到最大重试次数）",
+                    "user_friendly": True
+                }
             )
         
-        # 安排重试
-        next_retry_at = retry_manager.schedule_retry(
-            execution_id,
-            execution.get('trade_date')
+        trade_date = execution.get('trade_date')
+        
+        # 直接执行重试，而不是安排重试
+        # 增加重试计数
+        new_retry_count = retry_manager.increment_retry_count(execution_id)
+        
+        # 更新状态为RUNNING
+        from src.database import update_daily_task_execution_status
+        update_daily_task_execution_status(
+            execution_id=execution_id,
+            status='RUNNING',
+            next_retry_at=None  # 清除下次重试时间
         )
         
-        if not next_retry_at:
-            raise HTTPException(
-                status_code=400,
-                detail="无法安排重试"
-            )
-        
-        # 在后台执行重试
-        trade_date = execution.get('trade_date')
+        # 在后台执行重试任务
         background_tasks.add_task(
-            _execute_task_async,
+            _execute_retry_task_async,
             task_executor,
-            trade_date,
-            'SCHEDULED',  # 重试任务标记为SCHEDULED
-            False
+            execution_id,
+            trade_date
         )
         
         return {
             "success": True,
-            "message": "重试任务已安排",
+            "message": "重试任务已触发，正在后台执行",
             "execution_id": execution_id,
-            "next_retry_at": next_retry_at.isoformat()
+            "retry_count": new_retry_count
         }
     
     except HTTPException:
@@ -397,3 +469,58 @@ async def retry_execution(
     except Exception as e:
         logger.exception(f"重试任务异常: {e}")
         raise HTTPException(status_code=500, detail=f"重试任务失败: {str(e)}")
+
+
+@router.get("/scheduler/status")
+async def get_scheduler_status():
+    """
+    获取调度器状态
+    
+    Returns:
+        调度器状态信息
+    """
+    try:
+        from api.main import _task_scheduler
+        from src.config_manager import ConfigManager
+        
+        config = ConfigManager()
+        jobs_config = config.get('jobs.daily_runner', {})
+        enabled = jobs_config.get('enabled', True)
+        schedule_time = jobs_config.get('schedule_time', '17:30')
+        timezone_str = jobs_config.get('timezone', 'Asia/Shanghai')
+        
+        if not enabled:
+            return {
+                "enabled": False,
+                "running": False,
+                "message": "调度器已禁用（配置中enabled=false）",
+                "schedule_time": schedule_time,
+                "timezone": timezone_str,
+                "next_run_time": None
+            }
+        
+        if _task_scheduler is None:
+            return {
+                "enabled": True,
+                "running": False,
+                "message": "调度器未初始化",
+                "schedule_time": schedule_time,
+                "timezone": timezone_str,
+                "next_run_time": None
+            }
+        
+        is_running = _task_scheduler.is_running()
+        next_run_time = _task_scheduler.get_next_run_time()
+        
+        return {
+            "enabled": True,
+            "running": is_running,
+            "message": "调度器正在运行" if is_running else "调度器未运行",
+            "schedule_time": schedule_time,
+            "timezone": timezone_str,
+            "next_run_time": next_run_time.isoformat() if next_run_time else None
+        }
+    
+    except Exception as e:
+        logger.exception(f"获取调度器状态异常: {e}")
+        raise HTTPException(status_code=500, detail=f"获取调度器状态失败: {str(e)}")

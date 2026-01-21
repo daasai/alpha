@@ -99,11 +99,15 @@ async def startup_event():
         enabled = jobs_config.get('enabled', True)
         
         if enabled:
-            _task_scheduler = TaskScheduler(config=config)
-            if _task_scheduler.start():
-                logger.info("任务调度器已启动")
+            # 检查是否已有运行中的调度器（防止重复启动）
+            if _task_scheduler and _task_scheduler.is_running():
+                logger.warning("任务调度器已在运行，跳过启动")
             else:
-                logger.warning("任务调度器启动失败")
+                _task_scheduler = TaskScheduler(config=config)
+                if _task_scheduler.start():
+                    logger.info("任务调度器已启动")
+                else:
+                    logger.warning("任务调度器启动失败")
         else:
             logger.info("任务调度器已禁用（配置中enabled=false）")
     

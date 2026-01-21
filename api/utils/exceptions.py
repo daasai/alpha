@@ -265,6 +265,36 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     """HTTP异常处理器"""
     logger.warning(f"HTTP Exception: {exc.status_code} - {exc.detail}")
     
+    # 处理detail为字典的情况（如重复执行错误）
+    if isinstance(exc.detail, dict):
+        error_code = exc.detail.get('error', 'HTTP_ERROR')
+        message = exc.detail.get('message', str(exc.detail))
+        hint = exc.detail.get('hint')
+        execution_id = exc.detail.get('execution_id')
+        user_friendly = exc.detail.get('user_friendly', False)
+        
+        # 构建响应内容
+        response_content = {
+            "success": False,
+            "error": error_code,
+            "message": message,
+            "error_id": None,
+            "data": None
+        }
+        
+        # 如果是用户友好的错误，添加额外信息
+        if user_friendly:
+            response_content["detail"] = {
+                "hint": hint,
+                "execution_id": execution_id,
+                "user_friendly": True
+            }
+        
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=response_content
+        )
+    
     # 记录错误到 ErrorTracker（仅记录 5xx 错误）
     error_id = None
     if exc.status_code >= 500:

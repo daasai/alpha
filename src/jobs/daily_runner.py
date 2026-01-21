@@ -110,9 +110,9 @@ class DailyRunner:
         Returns:
             执行结果字典，包含 success, steps_completed, errors
         """
-        # 确定交易日期
+        # 确定交易日期（使用get_trade_date确保正确处理周末和17:00前的情况）
         if trade_date is None:
-            trade_date = datetime.now().strftime('%Y%m%d')
+            trade_date = get_trade_date()
         
         result = {
             'success': False,
@@ -194,20 +194,48 @@ class DailyRunner:
         """
         current_time = datetime.now().strftime('%H:%M')
         
-        # 1. 数据可用性检查：检查指数数据
-        try:
-            index_data = self.data_provider._tushare_client.get_daily(
-                ts_code="000001.SH",
-                trade_date=trade_date,
-                fields="ts_code,trade_date,close"
-            )
-            
-            if index_data.empty:
-                logger.warning(f"⚠️ Tushare数据尚未就绪，交易日期: {trade_date}。终止执行。")
+        # 1. 数据可用性检查：尝试多个指数，增加容错性
+        index_codes = ["000001.SH", "000300.SH", "399001.SZ"]  # 上证指数、沪深300、深证成指
+        index_data = None
+        last_error = None
+        
+        for index_code in index_codes:
+            try:
+                index_data = self.data_provider._tushare_client.get_daily(
+                    ts_code=index_code,
+                    trade_date=trade_date,
+                    fields="ts_code,trade_date,close"
+                )
+                
+                if not index_data.empty:
+                    logger.debug(f"数据可用性检查成功: {index_code} 有数据，交易日期: {trade_date}")
+                    break
+                else:
+                    logger.debug(f"数据可用性检查: {index_code} 无数据，尝试下一个指数")
+            except Exception as e:
+                last_error = e
+                logger.debug(f"数据可用性检查: {index_code} 查询失败: {e}，尝试下一个指数")
+                continue
+        
+        # 如果所有指数都查询失败或为空，再尝试使用daily_basic作为降级方案
+        if index_data is None or index_data.empty:
+            logger.warning(f"⚠️ 所有指数数据查询失败，尝试使用daily_basic作为降级方案，交易日期: {trade_date}")
+            try:
+                # 尝试获取daily_basic数据作为验证
+                basic_df = self.data_provider.get_daily_basic(trade_date)
+                if not basic_df.empty:
+                    logger.info(f"降级方案成功: daily_basic有数据（{len(basic_df)}条），交易日期: {trade_date}")
+                    # 降级方案成功，继续执行
+                else:
+                    error_msg = f"Tushare数据尚未就绪（指数和daily_basic都无数据），交易日期: {trade_date}"
+                    if last_error:
+                        error_msg += f"，最后错误: {last_error}"
+                    logger.warning(f"⚠️ {error_msg}。终止执行。")
+                    return False
+            except Exception as e:
+                error_msg = f"Tushare数据可用性检查失败，交易日期: {trade_date}，错误: {str(e)}"
+                logger.warning(f"⚠️ {error_msg}。终止执行。")
                 return False
-        except Exception as e:
-            logger.warning(f"⚠️ 数据可用性检查失败: {e}")
-            return False
         
         # 2. 获取并缓存股票数据
         try:
@@ -317,7 +345,10 @@ class DailyRunner:
             
             # 保存 NAV
             save_or_update_daily_nav(trade_date, total_asset, benchmark_val)
-            logger.info(f"[{current_time}] NAV已保存: 总资产={total_asset:.2f}, 基准={benchmark_val:.2f if benchmark_val else 'N/A'}")
+            
+            # 修复格式化字符串错误：不能在格式说明符中使用条件表达式
+            benchmark_str = f"{benchmark_val:.2f}" if benchmark_val is not None else 'N/A'
+            logger.info(f"[{current_time}] NAV已保存: 总资产={total_asset:.2f}, 基准={benchmark_str}")
             
             return benchmark_val
         else:

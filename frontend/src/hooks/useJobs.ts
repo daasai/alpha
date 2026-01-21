@@ -138,3 +138,39 @@ export function useDailyRunnerHistory(
     refetch: fetchHistory
   };
 }
+
+/**
+ * Hook for retrying failed execution
+ */
+export function useRetryExecution() {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  const retry = useCallback(async (execution_id: string) => {
+    setLoading(true);
+    setError(null);
+    
+    try {
+      const response = await jobsApi.retryExecution(execution_id);
+      
+      if (response.success && response.data) {
+        return response.data;
+      } else {
+        const errorMsg = response.message || response.error || '重试任务失败';
+        throw new Error(errorMsg);
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error('重试任务失败');
+      setError(error);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  return {
+    retry,
+    loading,
+    error
+  };
+}

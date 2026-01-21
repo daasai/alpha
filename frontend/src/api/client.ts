@@ -74,6 +74,8 @@ apiClient.interceptors.response.use(
         (apiError as any).status = error.response.status;
         (apiError as any).error_id = errorData.error_id;  // 保存错误ID
         (apiError as any).data = errorData.data;
+        (apiError as any).detail = errorData.detail;  // 保存detail信息（用于友好错误提示）
+        (apiError as any).response = error.response;  // 保存完整响应以便前端处理
         return Promise.reject(apiError);
       }
       

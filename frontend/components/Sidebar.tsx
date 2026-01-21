@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type React from 'react';
-import { LayoutDashboard, Crosshair, Briefcase, FlaskConical, Settings, Zap, PanelLeftClose, PanelLeftOpen, Play, ChevronDown, ChevronRight } from 'lucide-react';
+import { useNavigate, useLocation } from 'react-router-dom';
+import { LayoutDashboard, Crosshair, Briefcase, FlaskConical, Settings, Zap, PanelLeftClose, PanelLeftOpen, ChevronDown, ChevronRight, Clock, User, Sliders } from 'lucide-react';
 import type { PageView } from '../src/types/domain';
-import { useTriggerDailyRunner } from '../src/hooks/useJobs';
 
 interface SidebarProps {
   activePage: PageView;
@@ -14,7 +14,15 @@ interface SidebarProps {
 const Sidebar: React.FC<SidebarProps> = ({ activePage, onNavigate, onNewScan, isOpen = false }) => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isSettingsExpanded, setIsSettingsExpanded] = useState(false);
-  const { trigger, loading: triggerLoading } = useTriggerDailyRunner();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  // 根据当前路径自动展开设置菜单
+  useEffect(() => {
+    if (location.pathname.startsWith('/settings')) {
+      setIsSettingsExpanded(true);
+    }
+  }, [location.pathname]);
 
   const menuItems: { id: PageView; label: string; icon: React.ReactNode }[] = [
     { id: 'dashboard', label: '驾驶舱 (Dashboard)', icon: <LayoutDashboard size={20} /> },
@@ -123,7 +131,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activePage, onNavigate, onNewScan, is
               if (!isCollapsed) {
                 setIsSettingsExpanded(!isSettingsExpanded);
               } else {
-                onNavigate('settings');
+                navigate('/settings');
               }
             }}
           >
@@ -147,33 +155,37 @@ const Sidebar: React.FC<SidebarProps> = ({ activePage, onNavigate, onNewScan, is
             <div className="ml-6 mt-1 space-y-1">
               <button
                 type="button"
-                className="flex items-center w-full py-2 px-3 gap-2 text-sm text-gray-600 hover:bg-gray-100 hover:text-gray-900 rounded-md transition-colors"
+                className={`flex items-center w-full py-2 px-3 gap-2 text-sm rounded-md transition-colors ${
+                  location.pathname === '/settings/scheduled-tasks'
+                    ? 'bg-gray-200 text-gray-900 font-medium'
+                    : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                }`}
                 onClick={() => {
-                  onNavigate('settings');
-                  setIsSettingsExpanded(false);
+                  navigate('/settings/scheduled-tasks');
                 }}
               >
-                <Settings size={14} className="shrink-0" />
-                <span>系统设置页面</span>
+                <Clock size={14} className="shrink-0" />
+                <span>定时任务</span>
               </button>
               <button
                 type="button"
-                disabled={triggerLoading}
-                className="flex items-center w-full py-2 px-3 gap-2 text-sm text-gray-600 hover:bg-gray-100 hover:text-gray-900 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                onClick={async () => {
-                  try {
-                    const result = await trigger({ force: false });
-                    if (result) {
-                      alert(`任务已触发，正在后台执行\n执行ID: ${result.execution_id}`);
-                    }
-                  } catch (error) {
-                    const errorMsg = error instanceof Error ? error.message : '触发任务失败';
-                    alert(`触发失败: ${errorMsg}`);
-                  }
-                }}
+                disabled
+                className="flex items-center w-full py-2 px-3 gap-2 text-sm text-gray-400 rounded-md transition-colors cursor-not-allowed opacity-60"
+                title="即将推出"
               >
-                <Play size={14} className="shrink-0" />
-                <span>{triggerLoading ? '触发中...' : '手动触发每日任务'}</span>
+                <User size={14} className="shrink-0" />
+                <span>用户设置</span>
+                <span className="ml-auto text-xs">即将推出</span>
+              </button>
+              <button
+                type="button"
+                disabled
+                className="flex items-center w-full py-2 px-3 gap-2 text-sm text-gray-400 rounded-md transition-colors cursor-not-allowed opacity-60"
+                title="即将推出"
+              >
+                <Sliders size={14} className="shrink-0" />
+                <span>参数设置</span>
+                <span className="ml-auto text-xs">即将推出</span>
               </button>
             </div>
           )}

@@ -1,7 +1,7 @@
 /**
  * Toast Notification Component
  */
-import React, { createContext, useContext, useState, useCallback, ReactNode } from 'react';
+import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
 import { X, CheckCircle, AlertCircle, Info, AlertTriangle } from 'lucide-react';
 
 type ToastType = 'success' | 'error' | 'info' | 'warning';
@@ -13,7 +13,7 @@ interface Toast {
 }
 
 interface ToastContextType {
-  showToast: (message: string, type?: ToastType) => void;
+  showToast: (message: string, type?: ToastType, duration?: number) => void;
 }
 
 const ToastContext = createContext<ToastContextType | undefined>(undefined);
@@ -29,14 +29,14 @@ export const useToast = () => {
 export const ToastProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const showToast = useCallback((message: string, type: ToastType = 'info') => {
+  const showToast = useCallback((message: string, type: ToastType = 'info', duration: number = 5000) => {
     const id = Math.random().toString(36).substr(2, 9);
     setToasts((prev) => [...prev, { id, message, type }]);
 
-    // Auto remove after 5 seconds
+    // Auto remove after specified duration (default 5 seconds)
     setTimeout(() => {
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
-    }, 5000);
+    }, duration);
   }, []);
 
   const removeToast = useCallback((id: string) => {
@@ -81,6 +81,7 @@ export const ToastProvider: React.FC<{ children: ReactNode }> = ({ children }) =
             {getIcon(toast.type)}
             <p className="flex-1 text-sm text-gray-900">{toast.message}</p>
             <button
+              type="button"
               onClick={() => removeToast(toast.id)}
               className="text-gray-400 hover:text-gray-600"
             >

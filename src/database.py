@@ -1172,7 +1172,9 @@ def save_or_update_daily_nav(trade_date: str, total_asset: float, benchmark_val:
                 s.add(nav)
                 logger.debug(f"创建每日净值: {trade_date}, 总资产={total_asset:.2f}")
         
-        logger.info(f"每日净值已保存: {trade_date}, 总资产={total_asset:.2f}, 基准={benchmark_val:.2f if benchmark_val else 'N/A'}")
+        # 修复格式化字符串错误：不能在格式说明符中使用条件表达式
+        benchmark_str = f"{benchmark_val:.2f}" if benchmark_val is not None else 'N/A'
+        logger.info(f"每日净值已保存: {trade_date}, 总资产={total_asset:.2f}, 基准={benchmark_str}")
     except Exception as e:
         logger.error(f"save_or_update_daily_nav 失败: {e}")
         raise
@@ -1238,7 +1240,9 @@ def update_daily_task_execution_status(
     steps_completed: Optional[List[str]] = None,
     errors: Optional[List[str]] = None,
     duration_seconds: Optional[float] = None,
-    is_duplicate: Optional[bool] = None
+    is_duplicate: Optional[bool] = None,
+    next_retry_at: Optional[datetime] = None,
+    retry_count: Optional[int] = None
 ) -> None:
     """
     更新任务执行状态
@@ -1250,6 +1254,8 @@ def update_daily_task_execution_status(
         errors: 错误列表（JSON格式）
         duration_seconds: 执行时长（秒）
         is_duplicate: 是否为重复执行
+        next_retry_at: 下次重试时间
+        retry_count: 重试计数
     """
     import json
     try:
@@ -1277,6 +1283,12 @@ def update_daily_task_execution_status(
             
             if is_duplicate is not None:
                 execution.is_duplicate = is_duplicate
+            
+            if next_retry_at is not None:
+                execution.next_retry_at = next_retry_at
+            
+            if retry_count is not None:
+                execution.retry_count = retry_count
             
             if status in ['SUCCESS', 'FAILED']:
                 execution.completed_at = datetime.now()

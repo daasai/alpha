@@ -84,15 +84,8 @@ class TaskScheduler:
                 replace_existing=True
             )
             
-            # 添加重试任务（每分钟检查一次）
-            self.scheduler.add_job(
-                func=self._check_retries,
-                trigger='cron',
-                minute='*',
-                id='retry_checker',
-                name='Retry Checker',
-                replace_existing=True
-            )
+            # 注意：自动重试检查器已移除，改为通过API手动重试
+            # 如需重试失败的任务，请使用 POST /api/v1/jobs/daily-runner/{execution_id}/retry
             
             # 启动调度器
             self.scheduler.start()
@@ -182,26 +175,94 @@ class TaskScheduler:
                 execution_id = execution.get('execution_id')
                 trade_date = execution.get('trade_date')
                 
+                # 检查是否应该重试
+                if not self.retry_manager.should_retry(execution_id, trade_date):
+                    logger.warning(f"执行 {execution_id} 不符合重试条件，跳过")
+                    continue
+                
                 logger.info(f"执行重试任务: execution_id={execution_id}, trade_date={trade_date}")
                 
                 try:
-                    result = self.task_executor.execute(
-                        trade_date=trade_date,
-                        trigger_type='SCHEDULED',  # 重试任务也标记为SCHEDULED
-                        force=False
+                    # 增加重试计数
+                    new_retry_count = self.retry_manager.increment_retry_count(execution_id)
+                    
+                    # 更新状态为RUNNING
+                    from src.database import update_daily_task_execution_status
+                    from datetime import datetime
+                    start_time = datetime.now()
+                    
+                    update_daily_task_execution_status(
+                        execution_id=execution_id,
+                        status='RUNNING',
+                        next_retry_at=None  # 清除下次重试时间
                     )
+                    
+                    # 执行任务（直接调用daily_runner，不创建新的执行记录）
+                    result = self.task_executor.daily_runner.run(
+                        trade_date=trade_date,
+                        execution_id=execution_id
+                    )
+                    
+                    # 计算执行时长
+                    end_time = datetime.now()
+                    duration = (end_time - start_time).total_seconds()
+                    
+                    # 更新执行记录状态
+                    if result.get('success'):
+                        update_daily_task_execution_status(
+                            execution_id=execution_id,
+                            status='SUCCESS',
+                            steps_completed=result.get('steps_completed', []),
+                            duration_seconds=duration
+                        )
+                        logger.info(
+                            f"重试任务执行成功: execution_id={execution_id}, "
+                            f"retry_count={new_retry_count}, duration={duration:.2f}秒"
+                        )
+                    else:
+                        # 执行失败，检查是否需要安排下次重试
+                        if self.retry_manager.should_retry(execution_id, trade_date):
+                            # 安排下次重试
+                            next_retry_at = self.retry_manager.schedule_retry(execution_id, trade_date)
+                            logger.info(
+                                f"重试任务执行失败，已安排下次重试: execution_id={execution_id}, "
+                                f"retry_count={new_retry_count}, next_retry_at={next_retry_at}"
+                            )
+                        else:
+                            # 已达到最大重试次数，标记为最终失败
+                            update_daily_task_execution_status(
+                                execution_id=execution_id,
+                                status='FAILED',
+                                errors=result.get('errors', []),
+                                steps_completed=result.get('steps_completed', []),
+                                duration_seconds=duration
+                            )
+                            logger.warning(
+                                f"重试任务执行失败且已达到最大重试次数: execution_id={execution_id}, "
+                                f"retry_count={new_retry_count}"
+                            )
                     
                     # 发送通知
                     self.notification_service.notify_execution_result(
-                        execution_id=result.get('execution_id', ''),
-                        trade_date=result.get('trade_date', ''),
-                        status=result.get('status', 'FAILED'),
+                        execution_id=execution_id,
+                        trade_date=trade_date,
+                        status='SUCCESS' if result.get('success') else 'FAILED',
                         errors=result.get('errors', []),
-                        duration_seconds=result.get('duration_seconds')
+                        duration_seconds=duration
                     )
                 
                 except Exception as e:
                     logger.exception(f"执行重试任务异常: {e}")
+                    # 更新状态为FAILED
+                    from src.database import update_daily_task_execution_status
+                    update_daily_task_execution_status(
+                        execution_id=execution_id,
+                        status='FAILED',
+                        errors=[f"执行异常: {str(e)}"]
+                    )
+                    # 检查是否需要安排下次重试
+                    if self.retry_manager.should_retry(execution_id, trade_date):
+                        self.retry_manager.schedule_retry(execution_id, trade_date)
         
         except Exception as e:
             logger.exception(f"检查重试任务异常: {e}")

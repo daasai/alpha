@@ -10,7 +10,8 @@ import Hunter from './components/pages/Hunter';
 import Portfolio from './components/pages/Portfolio';
 import Lab from './components/pages/Lab';
 import Settings from './components/pages/Settings';
-import { PageView } from './types/domain';
+import ScheduledTasks from './components/pages/ScheduledTasks';
+import type { PageView } from './types/domain';
 import { Menu } from 'lucide-react';
 
 // Inner component that uses router hooks
@@ -113,6 +114,7 @@ const AppContent: React.FC = () => {
             <Route path="/portfolio" element={<Portfolio />} />
             <Route path="/lab" element={<Lab />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/settings/scheduled-tasks" element={<ScheduledTasks />} />
           </Routes>
         </div>
       </main>

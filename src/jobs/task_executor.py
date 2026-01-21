@@ -127,15 +127,6 @@ class TaskExecutor:
                 max_retries=self.max_retries
             )
             
-            if result['is_duplicate']:
-                update_daily_task_execution_status(
-                    execution_id=execution_id,
-                    status='DUPLICATE',
-                    is_duplicate=True,
-                    errors=result['errors']
-                )
-                return result
-            
             # 4. 更新状态为RUNNING
             update_daily_task_execution_status(
                 execution_id=execution_id,
