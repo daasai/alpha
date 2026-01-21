@@ -15,6 +15,7 @@ class BacktestRequest(BaseModel):
     benchmark_code: str = Field("000300.SH", description="基准指数代码")
     index_code: Optional[str] = Field(None, description="股票池指数代码")
     max_positions: Optional[int] = Field(None, description="最大持仓数")
+    rps_threshold: Optional[float] = Field(None, description="RPS阈值，默认使用配置值")
 
 
 class EquityCurvePoint(BaseModel):

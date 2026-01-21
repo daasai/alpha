@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
-import { LayoutDashboard, Crosshair, Briefcase, FlaskConical, Settings, Zap, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
-import { PageView } from '../src/types/domain';
+import { useState } from 'react';
+import type React from 'react';
+import { LayoutDashboard, Crosshair, Briefcase, FlaskConical, Settings, Zap, PanelLeftClose, PanelLeftOpen, Play, ChevronDown, ChevronRight } from 'lucide-react';
+import type { PageView } from '../src/types/domain';
+import { useTriggerDailyRunner } from '../src/hooks/useJobs';
 
 interface SidebarProps {
   activePage: PageView;
@@ -11,6 +13,8 @@ interface SidebarProps {
 
 const Sidebar: React.FC<SidebarProps> = ({ activePage, onNavigate, onNewScan, isOpen = false }) => {
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isSettingsExpanded, setIsSettingsExpanded] = useState(false);
+  const { trigger, loading: triggerLoading } = useTriggerDailyRunner();
 
   const menuItems: { id: PageView; label: string; icon: React.ReactNode }[] = [
     { id: 'dashboard', label: '驾驶舱 (Dashboard)', icon: <LayoutDashboard size={20} /> },
@@ -33,7 +37,11 @@ const Sidebar: React.FC<SidebarProps> = ({ activePage, onNavigate, onNewScan, is
       <div className={`p-6 flex transition-all duration-300 ${isCollapsed ? 'flex-col items-center gap-4' : 'flex-row items-center justify-between'}`}>
         {/* Logo & Identity */}
         <div className="flex items-center overflow-hidden">
-          <div className="text-xl shrink-0 select-none">🛰️</div>
+          <img 
+            src="/logo/favicon-32x32.png" 
+            alt="DAAS Alpha Logo" 
+            className="w-8 h-8 shrink-0 select-none"
+          />
           <div className={`ml-2 whitespace-nowrap transition-all duration-300 ${isCollapsed ? 'w-0 opacity-0 hidden' : 'w-auto opacity-100 block'}`}>
             <h1 className="text-xl font-bold text-gray-900 leading-tight">DAAS Alpha</h1>
             <p className="text-[10px] text-gray-500 font-medium tracking-wider uppercase">v1.3 Pro</p>
@@ -111,13 +119,64 @@ const Sidebar: React.FC<SidebarProps> = ({ activePage, onNavigate, onNewScan, is
             type="button"
             className={`flex items-center text-gray-500 hover:text-gray-900 transition-colors ${isCollapsed ? 'justify-center w-12 h-12 mx-auto' : 'w-full py-2 gap-2'}`}
             title="系统设置"
-            onClick={() => console.log('Settings clicked')}
+            onClick={() => {
+              if (!isCollapsed) {
+                setIsSettingsExpanded(!isSettingsExpanded);
+              } else {
+                onNavigate('settings');
+              }
+            }}
           >
             <Settings size={16} className="shrink-0" />
             <span className={`whitespace-nowrap overflow-hidden transition-all duration-300 ${isCollapsed ? 'w-0 opacity-0' : 'w-auto opacity-100'}`}>
               系统设置
             </span>
+            {!isCollapsed && (
+              <div className="ml-auto">
+                {isSettingsExpanded ? (
+                  <ChevronDown size={16} className="shrink-0" />
+                ) : (
+                  <ChevronRight size={16} className="shrink-0" />
+                )}
+              </div>
+            )}
           </button>
+          
+          {/* Settings Submenu */}
+          {!isCollapsed && isSettingsExpanded && (
+            <div className="ml-6 mt-1 space-y-1">
+              <button
+                type="button"
+                className="flex items-center w-full py-2 px-3 gap-2 text-sm text-gray-600 hover:bg-gray-100 hover:text-gray-900 rounded-md transition-colors"
+                onClick={() => {
+                  onNavigate('settings');
+                  setIsSettingsExpanded(false);
+                }}
+              >
+                <Settings size={14} className="shrink-0" />
+                <span>系统设置页面</span>
+              </button>
+              <button
+                type="button"
+                disabled={triggerLoading}
+                className="flex items-center w-full py-2 px-3 gap-2 text-sm text-gray-600 hover:bg-gray-100 hover:text-gray-900 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={async () => {
+                  try {
+                    const result = await trigger({ force: false });
+                    if (result) {
+                      alert(`任务已触发，正在后台执行\n执行ID: ${result.execution_id}`);
+                    }
+                  } catch (error) {
+                    const errorMsg = error instanceof Error ? error.message : '触发任务失败';
+                    alert(`触发失败: ${errorMsg}`);
+                  }
+                }}
+              >
+                <Play size={14} className="shrink-0" />
+                <span>{triggerLoading ? '触发中...' : '手动触发每日任务'}</span>
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

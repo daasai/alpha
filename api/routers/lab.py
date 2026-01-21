@@ -43,7 +43,8 @@ async def run_backtest(
             cost_rate=request.cost_rate,
             benchmark_code=request.benchmark_code,
             index_code=request.index_code,
-            max_positions=request.max_positions
+            max_positions=request.max_positions,
+            rps_threshold=request.rps_threshold
         )
         return success_response(data=result)
     except Exception as e:

@@ -1,7 +1,0 @@
-# FastAPI and related dependencies
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-pydantic>=2.0.0
-python-multipart>=0.0.6
-
-# Note: CORS is built into FastAPI/Starlette, no separate package needed

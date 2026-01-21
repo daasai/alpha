@@ -107,7 +107,12 @@ class RPSFactor(BaseFactor):
             ranked = group.rank(pct=True, method='min', na_option='keep')
             return ranked * 100
         
+        # 在排名前按pct_chg和ts_code排序，确保相同值时的稳定性
+        df = df.sort_values(['trade_date', 'pct_chg', 'ts_code']).reset_index(drop=True)
         df[column_name] = df.groupby('trade_date')['pct_chg'].transform(rank_pct_chg)
+        
+        # 确保RPS值在0-100范围内（处理可能的浮点误差）
+        df[column_name] = df[column_name].clip(lower=0.0, upper=100.0)
         
         # 对于历史数据不足的股票，pct_chg 和 rps 都会是 NaN，这是正常的
         

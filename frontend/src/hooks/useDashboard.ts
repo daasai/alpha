@@ -1,9 +1,11 @@
 /**
  * Dashboard Hooks
+ * Enhanced version: Integrated with Event Bus for auto-refresh
  */
 import { useEffect, useRef } from 'react';
 import { useApi } from './useApi';
 import { useDashboardStore } from '../store/dashboardStore';
+import { eventBus } from '../store/eventBus';
 import * as dashboardApi from '../api/services/dashboard';
 import type { DashboardOverview, MarketTrend } from '../types/api';
 
@@ -39,6 +41,18 @@ export function useDashboardOverview(tradeDate?: string) {
     }
   }, [apiState.error]);
 
+  // 监听 Dashboard 刷新事件
+  useEffect(() => {
+    const unsubscribe = eventBus.subscribe('DASHBOARD_REFRESH', () => {
+      // 触发重新获取数据
+      if (apiState.refetch) {
+        apiState.refetch();
+      }
+    });
+    
+    return unsubscribe;
+  }, [apiState]);
+
   return apiState;
 }
 
@@ -73,6 +87,18 @@ export function useMarketTrend(days: number = 60, indexCode: string = '000001.SH
       setErrorRef.current(apiState.error);
     }
   }, [apiState.error]);
+
+  // 监听市场数据更新事件
+  useEffect(() => {
+    const unsubscribe = eventBus.subscribe('MARKET_DATA_UPDATED', () => {
+      // 触发重新获取数据
+      if (apiState.refetch) {
+        apiState.refetch();
+      }
+    });
+    
+    return unsubscribe;
+  }, [apiState]);
 
   return apiState;
 }

@@ -29,7 +29,15 @@ export const API_ENDPOINTS = {
   PORTFOLIO_POSITIONS: `${API_BASE_URL}/api/portfolio/positions`,
   PORTFOLIO_METRICS: `${API_BASE_URL}/api/portfolio/metrics`,
   PORTFOLIO_REFRESH_PRICES: `${API_BASE_URL}/api/portfolio/refresh-prices`,
+  PORTFOLIO_OVERVIEW: `${API_BASE_URL}/api/portfolio/overview`,
+  PORTFOLIO_HISTORY: `${API_BASE_URL}/api/portfolio/history`,
+  PORTFOLIO_ORDER: `${API_BASE_URL}/api/portfolio/order`,
   
   // Lab
   LAB_BACKTEST: `${API_BASE_URL}/api/lab/backtest`,
+  
+  // Jobs
+  JOBS_TRIGGER: `${API_BASE_URL}/api/v1/jobs/daily-runner/trigger`,
+  JOBS_STATUS: `${API_BASE_URL}/api/v1/jobs/daily-runner/status`,
+  JOBS_HISTORY: `${API_BASE_URL}/api/v1/jobs/daily-runner/history`,
 } as const;

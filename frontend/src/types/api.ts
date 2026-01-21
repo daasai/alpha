@@ -65,6 +65,17 @@ export interface HunterScanRequest {
   volume_ratio_threshold?: number;
 }
 
+export interface StockSignal {
+  code: string;
+  name: string;
+  price: number;
+  rps: number;
+  volume_ratio: number;
+  pe?: number;
+  industry?: string;
+  reason?: string;
+}
+
 export interface HunterStockResult {
   id: string;
   code: string;
@@ -73,15 +84,23 @@ export interface HunterStockResult {
   change_percent: number;
   rps: number;
   volume_ratio: number;
+  pe?: number;
+  industry?: string;
+  reason?: string;
   ai_analysis?: string;
 }
 
 export interface HunterScanResponse {
   success: boolean;
   trade_date?: string;
-  results: HunterStockResult[];
+  results: StockSignal[];
   diagnostics?: any;
   error?: string;
+}
+
+export interface TradeDateOption {
+  value: string;
+  label: string;
 }
 
 export interface HunterFilters {
@@ -103,25 +122,70 @@ export interface HunterFilters {
     max: number;
     step: number;
   };
+  available_dates?: TradeDateOption[];
 }
 
 /**
  * Portfolio API Types
  */
+export interface Account {
+  id: number;
+  total_asset: number;
+  cash: number;
+  market_value: number;
+  frozen_cash: number;
+  initial_asset?: number;
+  yesterday_nav?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface Order {
+  order_id: string;
+  trade_date: string;
+  ts_code: string;
+  action: 'BUY' | 'SELL';
+  price: number;
+  volume: number;
+  fee: number;
+  status: string;
+  strategy_tag?: string;
+  reason?: string;
+  created_at?: string;
+}
+
+export interface OrderParams {
+  action: 'BUY' | 'SELL';
+  ts_code: string;
+  price: number;
+  volume: number;
+  strategy_tag?: string;
+  reason?: string;
+}
+
 export interface PortfolioPosition {
   id: string;
   code: string;
   name: string;
-  cost: number;
-  current_price: number;
-  shares: number;
-  stop_loss_price: number;
+  cost?: number;
+  current_price?: number;
+  shares?: number;
+  stop_loss_price?: number;
+  total_vol?: number;
+  avail_vol?: number;
+  profit?: number;
+  profit_pct?: number;
 }
 
 export interface PortfolioMetrics {
   total_return: number;
   max_drawdown: number;
   sharpe_ratio: number;
+}
+
+export interface PortfolioOverview {
+  account: Account;
+  positions: PortfolioPosition[];
 }
 
 export interface AddPositionRequest {
@@ -150,6 +214,7 @@ export interface BacktestRequest {
   benchmark_code?: string;
   index_code?: string;
   max_positions?: number;
+  rps_threshold?: number;
 }
 
 export interface EquityCurvePoint {

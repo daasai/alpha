@@ -5,7 +5,7 @@ SQLite + SQLAlchemy：predictions 表及 save/update/get 方法
 
 from pathlib import Path
 from contextlib import contextmanager
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -22,7 +22,7 @@ _DB_PATH = _DATA_DIR / "daas.db"
 # 确保 data 目录存在
 _DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, UniqueConstraint, Boolean
 from datetime import datetime
 
 Base = declarative_base()
@@ -93,6 +93,108 @@ class DailyHistoryCache(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
 
 
+class Account(Base):
+    """账户表（单例）"""
+    __tablename__ = "accounts"
+
+    id = Column(Integer, primary_key=True, default=1)  # 单例，固定为1
+    total_asset = Column(Float, nullable=False, default=0.0)  # 总资产
+    cash = Column(Float, nullable=False, default=0.0)  # 现金
+    market_value = Column(Float, nullable=False, default=0.0)  # 市值
+    frozen_cash = Column(Float, nullable=False, default=0.0)  # 冻结资金
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('id', name='uq_account_id'),  # 确保单例
+    )
+
+
+class Position(Base):
+    """持仓表"""
+    __tablename__ = "positions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts_code = Column(String(20), nullable=False, unique=True)  # 股票代码，唯一约束
+    name = Column(String(100), nullable=False)  # 股票名称
+    total_vol = Column(Integer, nullable=False, default=0)  # 总持仓量
+    avail_vol = Column(Integer, nullable=False, default=0)  # 可用持仓量（T+1）
+    avg_price = Column(Float, nullable=False, default=0.0)  # 平均成本价
+    current_price = Column(Float, nullable=True)  # 最新市价
+    profit = Column(Float, nullable=False, default=0.0)  # 浮动盈亏
+    profit_pct = Column(Float, nullable=False, default=0.0)  # 盈亏百分比
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
+class DailyNav(Base):
+    """每日净值表"""
+    __tablename__ = "daily_nav"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_date = Column(String(8), nullable=False)  # 交易日期（YYYYMMDD）
+    total_asset = Column(Float, nullable=False)  # 总资产
+    benchmark_val = Column(Float, nullable=True)  # 基准指数收盘价
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('trade_date', name='uq_daily_nav_trade_date'),  # 确保每日只有一条记录
+    )
+
+
+class Order(Base):
+    """订单表（不可变账本）"""
+    __tablename__ = "orders"
+
+    order_id = Column(String(36), primary_key=True)  # UUID
+    trade_date = Column(String(8), nullable=False)  # 交易日期（YYYYMMDD）
+    ts_code = Column(String(20), nullable=False)  # 股票代码
+    action = Column(String(10), nullable=False)  # BUY/SELL
+    price = Column(Float, nullable=False)  # 成交价格
+    volume = Column(Integer, nullable=False)  # 成交数量
+    fee = Column(Float, nullable=False, default=0.0)  # 手续费
+    status = Column(String(20), nullable=False, default='FILLED')  # FILLED/CANCELLED
+    strategy_tag = Column(String(20), nullable=True)  # 买入订单的策略标签
+    reason = Column(String(200), nullable=True)  # 卖出订单的原因
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
+class ErrorLog(Base):
+    """错误日志表"""
+    __tablename__ = "error_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    error_code = Column(String(50), nullable=False)  # 错误代码
+    error_type = Column(String(100), nullable=False)  # 错误类型
+    message = Column(Text, nullable=False)  # 错误消息
+    context = Column(Text, nullable=True)  # 上下文信息（JSON格式）
+    stack_trace = Column(Text, nullable=True)  # 堆栈跟踪
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
+class DailyTaskExecution(Base):
+    """每日任务执行记录表"""
+    __tablename__ = "daily_task_executions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    execution_id = Column(String(36), nullable=False, unique=True)  # UUID
+    trade_date = Column(String(8), nullable=False)  # 交易日期 YYYYMMDD
+    trigger_type = Column(String(20), nullable=False)  # SCHEDULED/MANUAL/API
+    status = Column(String(20), nullable=False)  # PENDING/RUNNING/SUCCESS/FAILED/RETRYING
+    is_duplicate = Column(Boolean, nullable=False, default=False)  # 是否为重复执行（幂等性标记）
+    started_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+    duration_seconds = Column(Float, nullable=True)
+    steps_completed = Column(Text, nullable=True)  # JSON数组
+    errors = Column(Text, nullable=True)  # JSON数组
+    retry_count = Column(Integer, nullable=False, default=0)
+    max_retries = Column(Integer, nullable=False, default=3)
+    next_retry_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    updated_at = Column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
 _engine = create_engine(
     f"sqlite:///{_DB_PATH}",
     connect_args={"check_same_thread": False},
@@ -142,9 +244,51 @@ def _migrate_database():
     except Exception as e:
         logger.debug(f"数据库迁移检查: {e}（可能是首次创建，将自动建表）")
 
+
+# v1.3: 数据库迁移 - 组合管理模块（Account, Position, Order）
+def _migrate_portfolio_models():
+    """迁移数据库，创建组合管理相关表（Account, Position, Order）"""
+    from sqlalchemy import inspect, text
+    try:
+        inspector = inspect(_engine)
+        
+        # 移除旧的 portfolio_positions 表（如果存在）
+        if inspector.has_table('portfolio_positions'):
+            try:
+                with _engine.begin() as conn:
+                    conn.execute(text("DROP TABLE IF EXISTS portfolio_positions"))
+                    logger.info("数据库迁移: 移除旧的 portfolio_positions 表")
+            except Exception as e:
+                logger.warning(f"移除旧表失败: {e}")
+        
+        # Account 表将在 Base.metadata.create_all 时自动创建
+        # Position 表将在 Base.metadata.create_all 时自动创建
+        # Order 表将在 Base.metadata.create_all 时自动创建
+        
+        logger.info("数据库迁移: 组合管理模型（Account, Position, Order）将在首次使用时自动创建")
+    except Exception as e:
+        logger.debug(f"数据库迁移检查: {e}（可能是首次创建，将自动建表）")
+
+
+def _migrate_error_log_table():
+    """迁移数据库，创建 ErrorLog 表（如果不存在）"""
+    from sqlalchemy import inspect
+    try:
+        inspector = inspect(_engine)
+        if not inspector.has_table('error_logs'):
+            # 表不存在，Base.metadata.create_all 会自动创建
+            logger.info("数据库迁移: ErrorLog 表将在首次使用时自动创建")
+        else:
+            logger.debug("数据库迁移: ErrorLog 表已存在")
+    except Exception as e:
+        logger.debug(f"数据库迁移检查: {e}（可能是首次创建，将自动建表）")
+
+
 # 执行迁移
 try:
     _migrate_database()
+    _migrate_portfolio_models()
+    _migrate_error_log_table()
 except Exception as e:
     logger.warning(f"数据库迁移检查失败: {e}，将在首次使用时自动创建")
 
@@ -203,6 +347,71 @@ def _create_indexes():
                         logger.info("数据库迁移: 创建 daily_history_cache trade_date 索引")
                     except Exception as e:
                         logger.debug(f"创建 daily_history_cache trade_date 索引失败（可能已存在）: {e}")
+        
+        # 为 positions 创建索引
+        if inspector.has_table('positions'):
+            with _engine.begin() as conn:
+                indexes = [idx['name'] for idx in inspector.get_indexes('positions')]
+                
+                # 创建 ts_code 索引（用于查询）
+                if 'idx_position_ts_code' not in indexes:
+                    try:
+                        conn.execute(text(
+                            "CREATE INDEX idx_position_ts_code ON positions(ts_code)"
+                        ))
+                        logger.info("数据库迁移: 创建 positions ts_code 索引")
+                    except Exception as e:
+                        logger.debug(f"创建 positions ts_code 索引失败（可能已存在）: {e}")
+        
+        # 为 orders 创建索引
+        if inspector.has_table('orders'):
+            with _engine.begin() as conn:
+                indexes = [idx['name'] for idx in inspector.get_indexes('orders')]
+                
+                # 创建 trade_date 索引（用于日期查询）
+                if 'idx_order_trade_date' not in indexes:
+                    try:
+                        conn.execute(text(
+                            "CREATE INDEX idx_order_trade_date ON orders(trade_date)"
+                        ))
+                        logger.info("数据库迁移: 创建 orders trade_date 索引")
+                    except Exception as e:
+                        logger.debug(f"创建 orders trade_date 索引失败（可能已存在）: {e}")
+                
+                # 创建 ts_code 索引（用于股票查询）
+                if 'idx_order_ts_code' not in indexes:
+                    try:
+                        conn.execute(text(
+                            "CREATE INDEX idx_order_ts_code ON orders(ts_code)"
+                        ))
+                        logger.info("数据库迁移: 创建 orders ts_code 索引")
+                    except Exception as e:
+                        logger.debug(f"创建 orders ts_code 索引失败（可能已存在）: {e}")
+        
+        # 为 error_logs 创建索引
+        if inspector.has_table('error_logs'):
+            with _engine.begin() as conn:
+                indexes = [idx['name'] for idx in inspector.get_indexes('error_logs')]
+                
+                # 创建 error_code 索引（用于查询）
+                if 'idx_error_code' not in indexes:
+                    try:
+                        conn.execute(text(
+                            "CREATE INDEX idx_error_code ON error_logs(error_code)"
+                        ))
+                        logger.info("数据库迁移: 创建 error_logs error_code 索引")
+                    except Exception as e:
+                        logger.debug(f"创建 error_logs error_code 索引失败（可能已存在）: {e}")
+                
+                # 创建 created_at 索引（用于时间范围查询）
+                if 'idx_error_created_at' not in indexes:
+                    try:
+                        conn.execute(text(
+                            "CREATE INDEX idx_error_created_at ON error_logs(created_at)"
+                        ))
+                        logger.info("数据库迁移: 创建 error_logs created_at 索引")
+                    except Exception as e:
+                        logger.debug(f"创建 error_logs created_at 索引失败（可能已存在）: {e}")
     except Exception as e:
         logger.debug(f"索引创建检查: {e}（可能是首次创建，将自动建表）")
 
@@ -228,29 +437,64 @@ def _session_scope():
 
 def save_daily_predictions(list_of_dicts: List[Dict[str, Any]]) -> None:
     """
-    批量保存每日预测。每条 dict 需含：trade_date, ts_code, name, ai_score, ai_reason；
+    批量保存每日预测（支持幂等性）。
+    每条 dict 需含：trade_date, ts_code, name, ai_score, ai_reason；
     可选：strategy_tag, suggested_shares（v1.1新增）；
     actual_chg 默认为 None。
+    
+    如果已存在相同 (trade_date, ts_code) 的记录，则更新；否则插入。
     """
     if not list_of_dicts:
         logger.warning("save_daily_predictions: 传入列表为空，跳过")
         return
+    
+    inserted_count = 0
+    updated_count = 0
+    
     with _session_scope() as s:
         for d in list_of_dicts:
-            r = Prediction(
-                trade_date=str(d["trade_date"]),
-                ts_code=str(d["ts_code"]),
-                name=str(d["name"]),
-                ai_score=int(d["ai_score"]),
-                ai_reason=str(d.get("ai_reason", "")),
-                actual_chg=None,
-                strategy_tag=str(d.get("strategy_tag", "")) if d.get("strategy_tag") else None,
-                suggested_shares=int(d["suggested_shares"]) if d.get("suggested_shares") is not None else None,
-                price_at_prediction=float(d["price_at_prediction"]) if d.get("price_at_prediction") is not None else None,
-                current_price=None,
-            )
-            s.add(r)
-    logger.info(f"save_daily_predictions: 已写入 {len(list_of_dicts)} 条")
+            trade_date = str(d["trade_date"])
+            ts_code = str(d["ts_code"])
+            
+            # 检查是否已存在
+            existing = s.query(Prediction).filter(
+                Prediction.trade_date == trade_date,
+                Prediction.ts_code == ts_code
+            ).first()
+            
+            if existing:
+                # 更新现有记录
+                existing.name = str(d["name"])
+                existing.ai_score = int(d["ai_score"])
+                existing.ai_reason = str(d.get("ai_reason", ""))
+                existing.strategy_tag = str(d.get("strategy_tag", "")) if d.get("strategy_tag") else None
+                existing.suggested_shares = int(d["suggested_shares"]) if d.get("suggested_shares") is not None else None
+                existing.price_at_prediction = float(d["price_at_prediction"]) if d.get("price_at_prediction") is not None else None
+                # 注意：不更新 actual_chg 和 current_price，这些字段由其他流程更新
+                updated_count += 1
+            else:
+                # 插入新记录
+                r = Prediction(
+                    trade_date=trade_date,
+                    ts_code=ts_code,
+                    name=str(d["name"]),
+                    ai_score=int(d["ai_score"]),
+                    ai_reason=str(d.get("ai_reason", "")),
+                    actual_chg=None,
+                    strategy_tag=str(d.get("strategy_tag", "")) if d.get("strategy_tag") else None,
+                    suggested_shares=int(d["suggested_shares"]) if d.get("suggested_shares") is not None else None,
+                    price_at_prediction=float(d["price_at_prediction"]) if d.get("price_at_prediction") is not None else None,
+                    current_price=None,
+                )
+                s.add(r)
+                inserted_count += 1
+        
+        if updated_count > 0:
+            logger.debug(f"save_daily_predictions: 更新 {updated_count} 条记录")
+        if inserted_count > 0:
+            logger.debug(f"save_daily_predictions: 插入 {inserted_count} 条记录")
+    
+    logger.info(f"save_daily_predictions: 已处理 {len(list_of_dicts)} 条（插入: {inserted_count}, 更新: {updated_count}）")
 
 
 def update_actual_performance(trade_date: str, ts_code: str, chg: float) -> None:
@@ -894,3 +1138,391 @@ def clear_old_daily_history(before_date: str) -> None:
                 logger.info(f"清理旧历史数据: 日期 < {before_date}, 删除 {deleted} 条")
     except Exception as e:
         logger.warning(f"clear_old_daily_history 失败: {e}")
+
+
+# ========== 每日净值管理方法 ==========
+
+def save_or_update_daily_nav(trade_date: str, total_asset: float, benchmark_val: Optional[float] = None) -> None:
+    """
+    保存或更新每日净值记录（幂等性保证）。
+    
+    Args:
+        trade_date: 交易日期（YYYYMMDD格式）
+        total_asset: 总资产
+        benchmark_val: 基准指数收盘价（可选）
+    """
+    try:
+        with _session_scope() as s:
+            # 查询是否已存在
+            existing = s.query(DailyNav).filter(DailyNav.trade_date == str(trade_date)).first()
+            
+            if existing:
+                # 更新现有记录
+                existing.total_asset = float(total_asset)
+                existing.benchmark_val = float(benchmark_val) if benchmark_val is not None else None
+                existing.updated_at = datetime.now()
+                logger.debug(f"更新每日净值: {trade_date}, 总资产={total_asset:.2f}")
+            else:
+                # 插入新记录
+                nav = DailyNav(
+                    trade_date=str(trade_date),
+                    total_asset=float(total_asset),
+                    benchmark_val=float(benchmark_val) if benchmark_val is not None else None
+                )
+                s.add(nav)
+                logger.debug(f"创建每日净值: {trade_date}, 总资产={total_asset:.2f}")
+        
+        logger.info(f"每日净值已保存: {trade_date}, 总资产={total_asset:.2f}, 基准={benchmark_val:.2f if benchmark_val else 'N/A'}")
+    except Exception as e:
+        logger.error(f"save_or_update_daily_nav 失败: {e}")
+        raise
+
+
+# ========== 每日任务执行记录管理方法 ==========
+
+def create_daily_task_execution(
+    execution_id: str,
+    trade_date: str,
+    trigger_type: str,
+    max_retries: int = 3
+) -> Dict[str, Any]:
+    """
+    创建每日任务执行记录
+    
+    Args:
+        execution_id: 执行ID（UUID）
+        trade_date: 交易日期（YYYYMMDD格式）
+        trigger_type: 触发类型（SCHEDULED/MANUAL/API）
+        max_retries: 最大重试次数
+        
+    Returns:
+        创建的执行记录字典
+    """
+    try:
+        with _session_scope() as s:
+            execution = DailyTaskExecution(
+                execution_id=execution_id,
+                trade_date=str(trade_date),
+                trigger_type=trigger_type,
+                status='PENDING',
+                is_duplicate=False,
+                started_at=datetime.now(),
+                max_retries=max_retries,
+                retry_count=0
+            )
+            s.add(execution)
+            
+            result = {
+                'id': execution.id,
+                'execution_id': execution.execution_id,
+                'trade_date': execution.trade_date,
+                'trigger_type': execution.trigger_type,
+                'status': execution.status,
+                'is_duplicate': execution.is_duplicate,
+                'started_at': execution.started_at,
+                'max_retries': execution.max_retries,
+                'retry_count': execution.retry_count,
+                'created_at': execution.created_at
+            }
+            
+            logger.info(f"创建任务执行记录: {execution_id}, 交易日期: {trade_date}")
+            return result
+    except Exception as e:
+        logger.error(f"create_daily_task_execution 失败: {e}")
+        raise
+
+
+def update_daily_task_execution_status(
+    execution_id: str,
+    status: str,
+    steps_completed: Optional[List[str]] = None,
+    errors: Optional[List[str]] = None,
+    duration_seconds: Optional[float] = None,
+    is_duplicate: Optional[bool] = None
+) -> None:
+    """
+    更新任务执行状态
+    
+    Args:
+        execution_id: 执行ID
+        status: 状态（PENDING/RUNNING/SUCCESS/FAILED/RETRYING）
+        steps_completed: 已完成的步骤列表（JSON格式）
+        errors: 错误列表（JSON格式）
+        duration_seconds: 执行时长（秒）
+        is_duplicate: 是否为重复执行
+    """
+    import json
+    try:
+        with _session_scope() as s:
+            execution = s.query(DailyTaskExecution).filter(
+                DailyTaskExecution.execution_id == execution_id
+            ).first()
+            
+            if not execution:
+                logger.warning(f"update_daily_task_execution_status: 未找到执行记录 {execution_id}")
+                return
+            
+            execution.status = status
+            execution.updated_at = datetime.now()
+            
+            if steps_completed is not None:
+                execution.steps_completed = json.dumps(steps_completed, ensure_ascii=False)
+            
+            if errors is not None:
+                execution.errors = json.dumps(errors, ensure_ascii=False)
+            
+            if duration_seconds is not None:
+                execution.duration_seconds = duration_seconds
+                execution.completed_at = datetime.now()
+            
+            if is_duplicate is not None:
+                execution.is_duplicate = is_duplicate
+            
+            if status in ['SUCCESS', 'FAILED']:
+                execution.completed_at = datetime.now()
+            
+            logger.debug(f"更新任务执行状态: {execution_id}, status={status}")
+    except Exception as e:
+        logger.error(f"update_daily_task_execution_status 失败: {e}")
+        raise
+
+
+def get_daily_task_execution_by_id(execution_id: str) -> Optional[Dict[str, Any]]:
+    """
+    根据执行ID获取任务执行记录
+    
+    Args:
+        execution_id: 执行ID
+        
+    Returns:
+        执行记录字典，如果不存在返回None
+    """
+    import json
+    try:
+        with _session_scope() as s:
+            execution = s.query(DailyTaskExecution).filter(
+                DailyTaskExecution.execution_id == execution_id
+            ).first()
+            
+            if not execution:
+                return None
+            
+            steps_completed = None
+            if execution.steps_completed:
+                try:
+                    steps_completed = json.loads(execution.steps_completed)
+                except:
+                    pass
+            
+            errors = None
+            if execution.errors:
+                try:
+                    errors = json.loads(execution.errors)
+                except:
+                    pass
+            
+            return {
+                'id': execution.id,
+                'execution_id': execution.execution_id,
+                'trade_date': execution.trade_date,
+                'trigger_type': execution.trigger_type,
+                'status': execution.status,
+                'is_duplicate': execution.is_duplicate,
+                'started_at': execution.started_at,
+                'completed_at': execution.completed_at,
+                'duration_seconds': execution.duration_seconds,
+                'steps_completed': steps_completed,
+                'errors': errors,
+                'retry_count': execution.retry_count,
+                'max_retries': execution.max_retries,
+                'next_retry_at': execution.next_retry_at,
+                'created_at': execution.created_at,
+                'updated_at': execution.updated_at
+            }
+    except Exception as e:
+        logger.error(f"get_daily_task_execution_by_id 失败: {e}")
+        return None
+
+
+def list_daily_task_executions(
+    trade_date: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50
+) -> List[Dict[str, Any]]:
+    """
+    列出任务执行记录
+    
+    Args:
+        trade_date: 交易日期（可选，用于过滤）
+        status: 状态（可选，用于过滤）
+        limit: 返回记录数限制
+        
+    Returns:
+        执行记录列表
+    """
+    import json
+    try:
+        with _session_scope() as s:
+            query = s.query(DailyTaskExecution)
+            
+            if trade_date:
+                query = query.filter(DailyTaskExecution.trade_date == str(trade_date))
+            
+            if status:
+                query = query.filter(DailyTaskExecution.status == status)
+            
+            executions = query.order_by(DailyTaskExecution.created_at.desc()).limit(limit).all()
+            
+            results = []
+            for execution in executions:
+                steps_completed = None
+                if execution.steps_completed:
+                    try:
+                        steps_completed = json.loads(execution.steps_completed)
+                    except:
+                        pass
+                
+                errors = None
+                if execution.errors:
+                    try:
+                        errors = json.loads(execution.errors)
+                    except:
+                        pass
+                
+                results.append({
+                    'id': execution.id,
+                    'execution_id': execution.execution_id,
+                    'trade_date': execution.trade_date,
+                    'trigger_type': execution.trigger_type,
+                    'status': execution.status,
+                    'is_duplicate': execution.is_duplicate,
+                    'started_at': execution.started_at,
+                    'completed_at': execution.completed_at,
+                    'duration_seconds': execution.duration_seconds,
+                    'steps_completed': steps_completed,
+                    'errors': errors,
+                    'retry_count': execution.retry_count,
+                    'max_retries': execution.max_retries,
+                    'next_retry_at': execution.next_retry_at,
+                    'created_at': execution.created_at,
+                    'updated_at': execution.updated_at
+                })
+            
+            return results
+    except Exception as e:
+        logger.error(f"list_daily_task_executions 失败: {e}")
+        return []
+
+
+def get_latest_daily_task_execution(trade_date: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    获取最新的任务执行记录
+    
+    Args:
+        trade_date: 交易日期（可选，如果提供则获取该日期的最新记录）
+        
+    Returns:
+        执行记录字典，如果不存在返回None
+    """
+    import json
+    try:
+        with _session_scope() as s:
+            query = s.query(DailyTaskExecution)
+            
+            if trade_date:
+                query = query.filter(DailyTaskExecution.trade_date == str(trade_date))
+            
+            execution = query.order_by(DailyTaskExecution.created_at.desc()).first()
+            
+            if not execution:
+                return None
+            
+            steps_completed = None
+            if execution.steps_completed:
+                try:
+                    steps_completed = json.loads(execution.steps_completed)
+                except:
+                    pass
+            
+            errors = None
+            if execution.errors:
+                try:
+                    errors = json.loads(execution.errors)
+                except:
+                    pass
+            
+            return {
+                'id': execution.id,
+                'execution_id': execution.execution_id,
+                'trade_date': execution.trade_date,
+                'trigger_type': execution.trigger_type,
+                'status': execution.status,
+                'is_duplicate': execution.is_duplicate,
+                'started_at': execution.started_at,
+                'completed_at': execution.completed_at,
+                'duration_seconds': execution.duration_seconds,
+                'steps_completed': steps_completed,
+                'errors': errors,
+                'retry_count': execution.retry_count,
+                'max_retries': execution.max_retries,
+                'next_retry_at': execution.next_retry_at,
+                'created_at': execution.created_at,
+                'updated_at': execution.updated_at
+            }
+    except Exception as e:
+        logger.error(f"get_latest_daily_task_execution 失败: {e}")
+        return None
+
+
+def get_running_daily_task_execution() -> Optional[Dict[str, Any]]:
+    """
+    获取正在运行的任务执行记录（用于并发控制）
+    
+    Returns:
+        执行记录字典，如果不存在返回None
+    """
+    import json
+    try:
+        with _session_scope() as s:
+            execution = s.query(DailyTaskExecution).filter(
+                DailyTaskExecution.status == 'RUNNING'
+            ).order_by(DailyTaskExecution.created_at.desc()).first()
+            
+            if not execution:
+                return None
+            
+            steps_completed = None
+            if execution.steps_completed:
+                try:
+                    steps_completed = json.loads(execution.steps_completed)
+                except:
+                    pass
+            
+            errors = None
+            if execution.errors:
+                try:
+                    errors = json.loads(execution.errors)
+                except:
+                    pass
+            
+            return {
+                'id': execution.id,
+                'execution_id': execution.execution_id,
+                'trade_date': execution.trade_date,
+                'trigger_type': execution.trigger_type,
+                'status': execution.status,
+                'is_duplicate': execution.is_duplicate,
+                'started_at': execution.started_at,
+                'completed_at': execution.completed_at,
+                'duration_seconds': execution.duration_seconds,
+                'steps_completed': steps_completed,
+                'errors': errors,
+                'retry_count': execution.retry_count,
+                'max_retries': execution.max_retries,
+                'next_retry_at': execution.next_retry_at,
+                'created_at': execution.created_at,
+                'updated_at': execution.updated_at
+            }
+    except Exception as e:
+        logger.error(f"get_running_daily_task_execution 失败: {e}")
+        return None

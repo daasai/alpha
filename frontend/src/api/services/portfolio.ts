@@ -7,6 +7,10 @@ import type {
   ApiResponse,
   PortfolioPosition,
   PortfolioMetrics,
+  PortfolioOverview,
+  Account,
+  Order,
+  OrderParams,
   AddPositionRequest,
   UpdatePositionRequest,
 } from '../../types/api';
@@ -61,4 +65,29 @@ export const deletePosition = async (positionId: string): Promise<void> => {
 export const refreshPrices = async (): Promise<ApiResponse<{ updated_count: number; total_positions: number }>> => {
   const response = await apiClient.post(API_ENDPOINTS.PORTFOLIO_REFRESH_PRICES);
   return response as unknown as ApiResponse<{ updated_count: number; total_positions: number }>;
+};
+
+/**
+ * Get portfolio overview (account + positions with real-time prices)
+ */
+export const getPortfolioOverview = async (): Promise<ApiResponse<PortfolioOverview>> => {
+  const response = await apiClient.get(API_ENDPOINTS.PORTFOLIO_OVERVIEW);
+  return response as unknown as ApiResponse<PortfolioOverview>;
+};
+
+/**
+ * Get order history
+ */
+export const getOrderHistory = async (limit?: number): Promise<ApiResponse<{ orders: Order[] }>> => {
+  const params = limit ? { limit } : {};
+  const response = await apiClient.get(API_ENDPOINTS.PORTFOLIO_HISTORY, { params });
+  return response as unknown as ApiResponse<{ orders: Order[] }>;
+};
+
+/**
+ * Place order (BUY or SELL)
+ */
+export const placeOrder = async (request: OrderParams): Promise<ApiResponse<Order>> => {
+  const response = await apiClient.post(API_ENDPOINTS.PORTFOLIO_ORDER, request);
+  return response as unknown as ApiResponse<Order>;
 };

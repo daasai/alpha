@@ -72,6 +72,8 @@ apiClient.interceptors.response.use(
         const apiError = new Error(errorMessage);
         (apiError as any).code = errorData.error || 'UNKNOWN_ERROR';
         (apiError as any).status = error.response.status;
+        (apiError as any).error_id = errorData.error_id;  // 保存错误ID
+        (apiError as any).data = errorData.data;
         return Promise.reject(apiError);
       }
       

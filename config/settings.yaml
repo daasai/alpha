@@ -55,6 +55,7 @@ api_rate_limit:
   tushare_delay: 0.1      # Tushare API延迟（秒）
   eastmoney_delay: 0.2   # 东方财富API延迟（秒）
   retry_delay: 0.5       # 重试延迟（秒）
+  qps_retry_delay: 60    # QPS限制错误重试延迟（秒），默认60秒
   task_delay: 0.02       # 任务完成后延迟（秒）
   max_retries: 3         # 最大重试次数
 
@@ -79,6 +80,9 @@ factors:
     window: 5   # 量比计算窗口（天）
   pe:
     max: 30     # 最大PE
+  bbi:
+    ma_windows: [3, 6, 12, 24]  # BBI计算的移动平均窗口（天）
+    confirmation_days: 1        # BBI确认信号所需连续天数（3日确认规则）
 
 # Hunter Configuration
 hunter:
@@ -88,3 +92,22 @@ hunter:
 portfolio:
   default_shares: 100  # 默认持仓数量（股）
   default_stop_loss_ratio: 0.9  # 默认止损比例（当前价格的90%）
+
+# Jobs Configuration
+jobs:
+  daily_runner:
+    enabled: true  # 是否启用定时任务
+    schedule_time: "17:30"  # 执行时间 HH:MM
+    timezone: "Asia/Shanghai"  # 时区
+    max_retries: 3  # 最大重试次数
+    retry_delays: [300, 600, 1800]  # 重试延迟（秒）：5分钟、10分钟、30分钟
+    timeout_seconds: 3600  # 任务超时时间（秒），默认1小时
+    notification:
+      enabled: true  # 是否启用通知
+      channels: ["log"]  # 通知渠道：log, email, system
+      email:
+        smtp_host: ""  # SMTP服务器地址
+        smtp_port: 587  # SMTP端口
+        smtp_user: ""  # SMTP用户名
+        smtp_password: ""  # SMTP密码
+        recipients: []  # 收件人列表

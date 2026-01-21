@@ -38,7 +38,10 @@ class BacktestService(BaseService):
         stop_loss_pct: float = 0.08,
         cost_rate: float = 0.002,
         benchmark_code: str = "000300.SH",
-        index_code: Optional[str] = None
+        index_code: Optional[str] = None,
+        rps_threshold: Optional[float] = None,
+        max_positions: Optional[int] = None,
+        initial_capital: Optional[float] = None
     ) -> BacktestResult:
         """
         运行回测
@@ -51,6 +54,7 @@ class BacktestService(BaseService):
             cost_rate: 交易成本率，默认0.002 (0.2%)
             benchmark_code: 基准指数代码，默认沪深300
             index_code: 股票池指数代码，如果为None则使用配置的指数
+            rps_threshold: RPS阈值，默认使用配置值
             
         Returns:
             BacktestResult: 回测结果
@@ -90,9 +94,9 @@ class BacktestService(BaseService):
             try:
                 backtester = VectorBacktester(self.data_provider)
                 
-                # 从配置获取回测参数
-                initial_capital = self.config.get('backtest.initial_capital', 1000000.0)
-                max_positions = self.config.get('backtest.max_positions', 4)
+                # 从参数或配置获取回测参数（参数优先）
+                final_initial_capital = initial_capital or self.config.get('backtest.initial_capital', 1000000.0)
+                final_max_positions = max_positions or self.config.get('backtest.max_positions', 4)
                 
                 results = backtester.run(
                     history_df,
@@ -100,8 +104,9 @@ class BacktestService(BaseService):
                     stop_loss_pct=stop_loss_pct,
                     cost_rate=cost_rate,
                     benchmark_code=benchmark_code,
-                    initial_capital=initial_capital,
-                    max_positions=max_positions
+                    initial_capital=final_initial_capital,
+                    max_positions=final_max_positions,
+                    rps_threshold=rps_threshold
                 )
             except Exception as e:
                 raise StrategyError(f"回测执行失败: {str(e)}") from e

@@ -1,9 +1,11 @@
 /**
  * Portfolio Hooks
+ * Enhanced version: Integrated with Event Bus
  */
 import { useEffect, useRef } from 'react';
 import { useApi } from './useApi';
 import { usePortfolioStore } from '../store/portfolioStore';
+import { eventBus } from '../store/eventBus';
 import * as portfolioApi from '../api/services/portfolio';
 import type { PortfolioPosition, PortfolioMetrics } from '../types/api';
 

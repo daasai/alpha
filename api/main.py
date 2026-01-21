@@ -54,11 +54,12 @@ app.add_exception_handler(StarletteHTTPException, http_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
 # Import routers
-from api.routers import dashboard, hunter, portfolio, lab
+from api.routers import dashboard, hunter, portfolio, lab, jobs
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
 app.include_router(hunter.router, prefix="/api/hunter", tags=["hunter"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(lab.router, prefix="/api/lab", tags=["lab"])
+app.include_router(jobs.router)  # jobs路由已包含/api/v1/jobs前缀
 
 
 @app.get("/")
@@ -79,6 +80,48 @@ async def health_check():
         "status": "healthy",
         "version": APIConfig.API_VERSION
     }
+
+
+# Task Scheduler - 启动后台调度器（如果启用）
+_task_scheduler = None
+
+@app.on_event("startup")
+async def startup_event():
+    """应用启动事件"""
+    global _task_scheduler
+    
+    try:
+        from src.jobs.scheduler import TaskScheduler
+        from src.config_manager import ConfigManager
+        
+        config = ConfigManager()
+        jobs_config = config.get('jobs.daily_runner', {})
+        enabled = jobs_config.get('enabled', True)
+        
+        if enabled:
+            _task_scheduler = TaskScheduler(config=config)
+            if _task_scheduler.start():
+                logger.info("任务调度器已启动")
+            else:
+                logger.warning("任务调度器启动失败")
+        else:
+            logger.info("任务调度器已禁用（配置中enabled=false）")
+    
+    except Exception as e:
+        logger.exception(f"启动任务调度器异常: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭事件"""
+    global _task_scheduler
+    
+    if _task_scheduler:
+        try:
+            _task_scheduler.stop()
+            logger.info("任务调度器已停止")
+        except Exception as e:
+            logger.exception(f"停止任务调度器异常: {e}")
 
 
 if __name__ == "__main__":
